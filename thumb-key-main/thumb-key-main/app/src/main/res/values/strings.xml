@@ -107,6 +107,9 @@
     <string name="show_toast_on_layout_switch">Show toast on layout switch</string>
     <string name="disable_fullscreen_editor">Disable fullscreen text editor</string>
     <string name="keyboard_opacity">Keyboard opacity: %1$s%%</string>
+    <string name="enable_key_fadeout">Enable key fadeout</string>
+    <string name="enable_key_fadeout_summary">Keys fade to transparent after being touched</string>
+    <string name="key_fadeout_time">Fadeout duration: %1$sms</string>
     <string name="touch_through">Touch-through non-input areas</string>
     <string name="touch_through_summary">Taps on dead space pass through to the app behind the keyboard</string>
     <string name="helper_full_opacity">Helper at full opacity</string>

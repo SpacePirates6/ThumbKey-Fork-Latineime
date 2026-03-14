@@ -47,6 +47,8 @@ import com.dessalines.thumbkey.db.DEFAULT_AUTO_CAPITALIZE
 import com.dessalines.thumbkey.db.DEFAULT_AUTO_SIZE_KEYS
 import com.dessalines.thumbkey.db.DEFAULT_FLOATING_CHAR_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_HELPER_FULL_OPACITY
+import com.dessalines.thumbkey.db.DEFAULT_ENABLE_KEY_FADEOUT
+import com.dessalines.thumbkey.db.DEFAULT_KEY_FADEOUT_TIME_MS
 import com.dessalines.thumbkey.db.DEFAULT_KEYBOARD_OPACITY
 import com.dessalines.thumbkey.db.DEFAULT_TOUCH_THROUGH_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_ZERO_HEIGHT_INSETS
@@ -250,6 +252,8 @@ fun KeyboardScreen(
     val keyboardOpacity = (settings?.keyboardOpacity ?: DEFAULT_KEYBOARD_OPACITY)
     val touchThroughEnabled = (settings?.touchThroughEnabled ?: DEFAULT_TOUCH_THROUGH_ENABLED).toBool()
     val helperFullOpacity = (settings?.helperFullOpacity ?: DEFAULT_HELPER_FULL_OPACITY).toBool()
+    val enableKeyFadeout = (settings?.enableKeyFadeout ?: DEFAULT_ENABLE_KEY_FADEOUT).toBool()
+    val keyFadeoutTimeMs = settings?.keyFadeoutTimeMs ?: DEFAULT_KEY_FADEOUT_TIME_MS
     val zeroHeightInsets = (settings?.zeroHeightInsets ?: DEFAULT_ZERO_HEIGHT_INSETS).toBool()
     val floatingCharEnabled = (settings?.floatingCharEnabled ?: DEFAULT_FLOATING_CHAR_ENABLED).toBool()
 
@@ -490,6 +494,10 @@ fun KeyboardScreen(
                                 circularDragEnabled = circularDragEnabled,
                                 clockwiseDragAction = clockwiseDragAction,
                                 counterclockwiseDragAction = counterclockwiseDragAction,
+                                helperFullOpacity = helperFullOpacity,
+                                opacityAlpha = opacityAlpha,
+                                enableKeyFadeout = enableKeyFadeout,
+                                keyFadeoutTimeMs = keyFadeoutTimeMs,
                             )
                         }
                     }
@@ -786,6 +794,8 @@ fun KeyboardScreen(
                                         counterclockwiseDragAction = counterclockwiseDragAction,
                                         helperFullOpacity = helperFullOpacity,
                                         opacityAlpha = opacityAlpha,
+                                        enableKeyFadeout = enableKeyFadeout,
+                                        keyFadeoutTimeMs = keyFadeoutTimeMs,
                                         predictionEngine = predictionEngine,
                                     )
                                 }

@@ -356,3 +356,15 @@ val MIGRATION_30_31 =
             )
         }
     }
+
+val MIGRATION_31_32 =
+    object : Migration(31, 32) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE AppSettings ADD COLUMN enable_key_fadeout INTEGER NOT NULL DEFAULT $DEFAULT_ENABLE_KEY_FADEOUT",
+            )
+            db.execSQL(
+                "ALTER TABLE AppSettings ADD COLUMN key_fadeout_time_ms INTEGER NOT NULL DEFAULT $DEFAULT_KEY_FADEOUT_TIME_MS",
+            )
+        }
+    }

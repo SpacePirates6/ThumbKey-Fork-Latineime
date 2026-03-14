@@ -54,6 +54,8 @@ import com.dessalines.thumbkey.db.AppSettingsViewModel
 import com.dessalines.thumbkey.db.DEFAULT_ANIMATION_HELPER_SPEED
 import com.dessalines.thumbkey.db.DEFAULT_ANIMATION_SPEED
 import com.dessalines.thumbkey.db.DEFAULT_AUTO_SIZE_KEYS
+import com.dessalines.thumbkey.db.DEFAULT_ENABLE_KEY_FADEOUT
+import com.dessalines.thumbkey.db.DEFAULT_KEY_FADEOUT_TIME_MS
 import com.dessalines.thumbkey.db.DEFAULT_KEYBOARD_OPACITY
 import com.dessalines.thumbkey.db.DEFAULT_TOUCH_THROUGH_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_BACKDROP_ENABLED
@@ -158,6 +160,10 @@ fun LookAndFeelScreen(
     var keyboardOpacityState = (settings?.keyboardOpacity ?: DEFAULT_KEYBOARD_OPACITY).toFloat()
     var keyboardOpacitySliderState by remember { mutableFloatStateOf(keyboardOpacityState) }
 
+    var enableKeyFadeoutState = (settings?.enableKeyFadeout ?: DEFAULT_ENABLE_KEY_FADEOUT).toBool()
+    var keyFadeoutTimeState = (settings?.keyFadeoutTimeMs ?: DEFAULT_KEY_FADEOUT_TIME_MS).toFloat()
+    var keyFadeoutTimeSliderState by remember { mutableFloatStateOf(keyFadeoutTimeState) }
+
     var touchThroughEnabledState = (settings?.touchThroughEnabled ?: DEFAULT_TOUCH_THROUGH_ENABLED).toBool()
 
     var disableFullscreenEditorState = (settings?.disableFullscreenEditor ?: DEFAULT_DISABLE_FULLSCREEN_EDITOR).toBool()
@@ -228,6 +234,8 @@ fun LookAndFeelScreen(
                 floatingCharMaxCount = floatingCharMaxCountState.toInt(),
                 floatingCharRealisticGravity = floatingCharRealisticGravityState.toInt(),
                 floatingCharImpactVelocity = floatingCharImpactVelocityState.toInt(),
+                enableKeyFadeout = enableKeyFadeoutState.toInt(),
+                keyFadeoutTimeMs = keyFadeoutTimeState.toInt(),
             ),
         )
     }
@@ -427,6 +435,48 @@ fun LookAndFeelScreen(
                             )
                         },
                     )
+
+                    SwitchPreference(
+                        value = enableKeyFadeoutState,
+                        onValueChange = {
+                            enableKeyFadeoutState = it
+                            updateLookAndFeel()
+                        },
+                        title = {
+                            Text(stringResource(R.string.enable_key_fadeout))
+                        },
+                        summary = {
+                            Text(stringResource(R.string.enable_key_fadeout_summary))
+                        },
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Outlined.Opacity,
+                                contentDescription = null,
+                            )
+                        },
+                    )
+
+                    if (enableKeyFadeoutState) {
+                        SliderPreference(
+                            value = keyFadeoutTimeState,
+                            sliderValue = keyFadeoutTimeSliderState,
+                            onValueChange = {
+                                keyFadeoutTimeState = it
+                                updateLookAndFeel()
+                            },
+                            onSliderValueChange = { keyFadeoutTimeSliderState = it },
+                            valueRange = 100f..3000f,
+                            title = {
+                                Text(stringResource(R.string.key_fadeout_time, keyFadeoutTimeSliderState.toInt().toString()))
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Outlined.Animation,
+                                    contentDescription = null,
+                                )
+                            },
+                        )
+                    }
 
                     SwitchPreference(
                         value = helperFullOpacityState,

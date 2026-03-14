@@ -79,6 +79,8 @@ const val DEFAULT_FLOATING_CHAR_MAX_TIME = 12     // ÷10  → 1.2f seconds time
 const val DEFAULT_FLOATING_CHAR_MAX_COUNT = 30    // max simultaneous chars on screen
 const val DEFAULT_FLOATING_CHAR_REALISTIC_GRAVITY = 0  // use accelerometer for tilt/shake physics
 const val DEFAULT_FLOATING_CHAR_IMPACT_VELOCITY = 0  // infer thumb velocity from last-impact-to-current-impact for non-swipe taps
+const val DEFAULT_ENABLE_KEY_FADEOUT = 0
+const val DEFAULT_KEY_FADEOUT_TIME_MS = 1000
 const val DEFAULT_CLIPBOARD_HISTORY_ENABLED = 0
 const val DEFAULT_CLIPBOARD_AUTO_CLEANUP_ENABLED = 1
 const val DEFAULT_CLIPBOARD_CLEANUP_AFTER_MINUTES = 120
@@ -403,6 +405,16 @@ data class AppSettings(
         defaultValue = DEFAULT_FLOATING_CHAR_IMPACT_VELOCITY.toString(),
     )
     val floatingCharImpactVelocity: Int = DEFAULT_FLOATING_CHAR_IMPACT_VELOCITY,
+    @ColumnInfo(
+        name = "enable_key_fadeout",
+        defaultValue = DEFAULT_ENABLE_KEY_FADEOUT.toString(),
+    )
+    val enableKeyFadeout: Int = DEFAULT_ENABLE_KEY_FADEOUT,
+    @ColumnInfo(
+        name = "key_fadeout_time_ms",
+        defaultValue = DEFAULT_KEY_FADEOUT_TIME_MS.toString(),
+    )
+    val keyFadeoutTimeMs: Int = DEFAULT_KEY_FADEOUT_TIME_MS,
 )
 
 data class LayoutsUpdate(
@@ -547,6 +559,10 @@ data class LookAndFeelUpdate(
     val floatingCharRealisticGravity: Int,
     @ColumnInfo(name = "floating_char_impact_velocity")
     val floatingCharImpactVelocity: Int,
+    @ColumnInfo(name = "enable_key_fadeout")
+    val enableKeyFadeout: Int,
+    @ColumnInfo(name = "key_fadeout_time_ms")
+    val keyFadeoutTimeMs: Int,
 )
 
 data class BehaviorUpdate(
@@ -696,7 +712,7 @@ class AppSettingsRepository(
 }
 
 @Database(
-    version = 31,
+    version = 32,
     entities = [AppSettings::class],
     exportSchema = true,
 )
@@ -749,6 +765,7 @@ abstract class AppDB : RoomDatabase() {
                             MIGRATION_28_29,
                             MIGRATION_29_30,
                             MIGRATION_30_31,
+                            MIGRATION_31_32,
                         )
                         // Necessary because it can't insert data on creation
                         .addCallback(

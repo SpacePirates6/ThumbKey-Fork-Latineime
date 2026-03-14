@@ -6,6 +6,7 @@ import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -140,6 +141,8 @@ fun KeyboardKey(
     counterclockwiseDragAction: CircularDragAction,
     helperFullOpacity: Boolean = false,
     opacityAlpha: Float = 1f,
+    enableKeyFadeout: Boolean = false,
+    keyFadeoutTimeMs: Int = 1000,
     predictionEngine: com.dessalines.thumbkey.prediction.PredictionEngine? = null,
 ) {
     val ctx = LocalContext.current
@@ -151,6 +154,32 @@ fun KeyboardKey(
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
+
+    var hasBeenReleasedAfterPress by remember { mutableStateOf(false) }
+    LaunchedEffect(isPressed) {
+        if (isPressed) {
+            hasBeenReleasedAfterPress = false
+        } else if (enableKeyFadeout) {
+            hasBeenReleasedAfterPress = true
+        }
+    }
+    val fadeoutTargetAlpha =
+        when {
+            isPressed -> 1f
+            enableKeyFadeout && hasBeenReleasedAfterPress -> 0f
+            else -> 1f // untouched: let parent apply keyboard opacity
+        }
+    val fadeoutAnimationSpec =
+        when {
+            isPressed -> tween<Float>(durationMillis = 0)
+            enableKeyFadeout && hasBeenReleasedAfterPress -> tween<Float>(durationMillis = keyFadeoutTimeMs)
+            else -> tween<Float>(durationMillis = 200)
+        }
+    val currentAlpha by animateFloatAsState(
+        targetValue = fadeoutTargetAlpha,
+        animationSpec = fadeoutAnimationSpec,
+    )
+    val displayAlpha = if (enableKeyFadeout) currentAlpha else 1f
 
     val isDragged = remember { mutableStateOf(false) }
     val releasedKey = remember { mutableStateOf<String?>(null) }
@@ -217,6 +246,7 @@ fun KeyboardKey(
 
     val keyboardKeyModifier =
         Modifier
+            .alpha(displayAlpha)
             .height(keyHeight.dp)
             .width(keyWidth.dp * key.widthMultiplier)
             .padding(keyPadding.dp)
