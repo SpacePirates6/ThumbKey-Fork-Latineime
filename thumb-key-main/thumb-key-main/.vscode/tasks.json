@@ -1,0 +1,88 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Debug APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat assembleDebug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main",
+                "env": {
+                    "JAVA_HOME": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot"
+                }
+            }
+        },
+        {
+            "label": "Build Release APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat assembleRelease",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main",
+                "env": {
+                    "JAVA_HOME": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot"
+                }
+            }
+        },
+        {
+            "label": "Clean",
+            "type": "shell",
+            "command": ".\\gradlew.bat clean",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main",
+                "env": {
+                    "JAVA_HOME": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot"
+                }
+            }
+        },
+        {
+            "label": "Clean & Build Debug APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat clean assembleDebug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main",
+                "env": {
+                    "JAVA_HOME": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot"
+                }
+            }
+        },
+        {
+            "label": "Install Debug APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat installDebug",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "new"
+            },
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main",
+                "env": {
+                    "JAVA_HOME": "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.8.9-hotspot"
+                }
+            }
+        }
+    ]
+}

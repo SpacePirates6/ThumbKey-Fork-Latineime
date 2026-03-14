@@ -1,0 +1,55 @@
+steps:
+  prettier_markdown_check:
+    image: jauderho/prettier:3.8.1-alpine
+    commands:
+      - prettier -c "**/*.md" "**/*.yml"
+    when:
+      - event: pull_request
+
+  check_formatting:
+    image: cimg/android:2026.02.1
+    commands:
+      - sudo chown -R circleci:circleci .
+      - ./gradlew lintKotlin
+    environment:
+      GRADLE_USER_HOME: ".gradle"
+    when:
+      - event: pull_request
+
+  check_android_lint:
+    image: cimg/android:2026.02.1
+    commands:
+      - sudo chown -R circleci:circleci .
+      - ./gradlew lint
+    environment:
+      GRADLE_USER_HOME: ".gradle"
+    when:
+      - event: pull_request
+
+  build_project:
+    image: cimg/android:2026.02.1
+    commands:
+      - sudo chown -R circleci:circleci .
+      - ./gradlew assembleDebug
+    environment:
+      GRADLE_USER_HOME: ".gradle"
+    when:
+      - event: pull_request
+
+  notify_success:
+    image: alpine:3
+    commands:
+      - apk add curl
+      - "curl -H'Title: ✔️ ${CI_REPO_NAME}/${CI_COMMIT_SOURCE_BRANCH}' -d'${CI_PIPELINE_URL}' ntfy.sh/thumbkey_ci"
+    when:
+      - event: pull_request
+        status: [success]
+
+  notify_failure:
+    image: alpine:3
+    commands:
+      - apk add curl
+      - "curl -H'Title: ❌ ${CI_REPO_NAME}/${CI_COMMIT_SOURCE_BRANCH}' -d'${CI_PIPELINE_URL}' ntfy.sh/thumbkey_ci"
+    when:
+      - event: pull_request
+        status: [failure]

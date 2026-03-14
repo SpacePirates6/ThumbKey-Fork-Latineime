@@ -1,0 +1,114 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#define LOG_TAG "LatinIME: jni"
+
+#include "jni_common.h"
+
+#include "org_futo_inputmethod_keyboard_ProximityInfo.h"
+#include "org_futo_inputmethod_latin_BinaryDictionary.h"
+#include "org_futo_inputmethod_latin_BinaryDictionaryUtils.h"
+#include "org_futo_inputmethod_latin_DicTraverseSession.h"
+#include "org_futo_inputmethod_latin_xlm_LanguageModel.h"
+#include "defines.h"
+#include "org_futo_inputmethod_latin_xlm_AdapterTrainer.h"
+#include "org_futo_voiceinput_WhisperGGML.h"
+#include "org_futo_inputmethod_latin_xlm_ModelInfoLoader.h"
+
+/*
+ * Returns the JNI version on success, -1 on failure.
+ *
+ * NOTE (Xpanse): Only LanguageModel is required for our LLM integration.
+ * The other FUTO classes (BinaryDictionary, ProximityInfo, DicTraverseSession,
+ * AdapterTrainer, ModelInfoLoader, WhisperGGML) do not exist in our codebase.
+ * If FindClass fails for any of them, JNI_OnLoad returns -1 and
+ * System.loadLibrary throws UnsatisfiedLinkError — crashing the app.
+ *
+ * Optional registrations use env->ExceptionClear() so a missing class
+ * does not leave a pending exception that could cause a native abort.
+ */
+jint JNI_OnLoad(JavaVM *vm, void *reserved) {
+    JNIEnv *env = nullptr;
+
+    if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        AKLOGE("ERROR: GetEnv failed");
+        return -1;
+    }
+    ASSERT(env);
+    if (!env) {
+        AKLOGE("ERROR: JNIEnv is invalid");
+        return -1;
+    }
+
+    // ---- REQUIRED: LanguageModel (the only JNI class Xpanse uses) ----
+    if (!latinime::register_LanguageModel(env)) {
+        AKLOGE("ERROR: LanguageModel native registration failed");
+        return -1;
+    }
+
+    // ---- OPTIONAL: Other FUTO classes (only present in full FUTO keyboard) ----
+    // These are safe to skip — we clear any pending exception from FindClass
+    // so that JNI_OnLoad can still return success.
+    if (!latinime::register_BinaryDictionary(env)) {
+        AKLOGI("NOTE: BinaryDictionary not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!latinime::register_BinaryDictionaryUtils(env)) {
+        AKLOGI("NOTE: BinaryDictionaryUtils not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!latinime::register_DicTraverseSession(env)) {
+        AKLOGI("NOTE: DicTraverseSession not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!latinime::register_ProximityInfo(env)) {
+        AKLOGI("NOTE: ProximityInfo not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!latinime::register_AdapterTrainer(env)) {
+        AKLOGI("NOTE: AdapterTrainer not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!latinime::register_ModelInfoLoader(env)) {
+        AKLOGI("NOTE: ModelInfoLoader not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!voiceinput::register_WhisperGGML(env)) {
+        AKLOGI("NOTE: WhisperGGML not found (optional, skipping)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    /* success -- return valid version number */
+    return JNI_VERSION_1_6;
+}
+
+namespace latinime {
+int registerNativeMethods(JNIEnv *env, const char *const className, const JNINativeMethod *methods,
+        const int numMethods) {
+    jclass clazz = env->FindClass(className);
+    if (!clazz) {
+        AKLOGE("Native registration unable to find class '%s'", className);
+        return JNI_FALSE;
+    }
+    if (env->RegisterNatives(clazz, methods, numMethods) != 0) {
+        AKLOGE("RegisterNatives failed for '%s'", className);
+        env->DeleteLocalRef(clazz);
+        return JNI_FALSE;
+    }
+    env->DeleteLocalRef(clazz);
+    return JNI_TRUE;
+}
+} // namespace latinime

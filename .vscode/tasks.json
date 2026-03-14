@@ -1,0 +1,88 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "ThumbKey: Build Debug APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat",
+            "args": [
+                "assembleDebug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Build ThumbKey debug APK"
+        },
+        {
+            "label": "ThumbKey: Build Release APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat",
+            "args": [
+                "assembleRelease"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main"
+            },
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Build ThumbKey release APK"
+        },
+        {
+            "label": "ThumbKey: Clean",
+            "type": "shell",
+            "command": ".\\gradlew.bat",
+            "args": [
+                "clean"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main"
+            },
+            "problemMatcher": [],
+            "detail": "Clean ThumbKey build artifacts"
+        },
+        {
+            "label": "ThumbKey: Install Debug APK",
+            "type": "shell",
+            "command": ".\\gradlew.bat",
+            "args": [
+                "installDebug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main"
+            },
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Build and install ThumbKey debug APK to connected device"
+        },
+        {
+            "label": "ThumbKey: Lint Check",
+            "type": "shell",
+            "command": ".\\gradlew.bat",
+            "args": [
+                "lintDebug"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/thumb-key-main/thumb-key-main"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "detail": "Run Android lint on ThumbKey"
+        },
+        {
+            "label": "ThumbKey: Clean + Build Debug",
+            "dependsOn": [
+                "ThumbKey: Clean",
+                "ThumbKey: Build Debug APK"
+            ],
+            "dependsOrder": "sequence",
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Clean and rebuild ThumbKey debug APK"
+        }
+    ]
+}
