@@ -1,19 +1,31 @@
 package com.dessalines.thumbkey
 
 import android.graphics.PixelFormat
+import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.Region
+import android.os.Build
 import android.inputmethodservice.InputMethodService
 import android.text.InputType
 import android.util.Log
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.CursorAnchorInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -38,6 +50,7 @@ import com.dessalines.thumbkey.db.DEFAULT_FLOATING_CHAR_REALISTIC_GRAVITY
 import com.dessalines.thumbkey.db.DEFAULT_FLOATING_CHAR_SPEED
 import com.dessalines.thumbkey.db.DEFAULT_FLOATING_CHAR_STEERING
 import com.dessalines.thumbkey.db.DEFAULT_DISABLE_FULLSCREEN_EDITOR
+import com.dessalines.thumbkey.db.DEFAULT_TAP_TO_PLACE_ENABLED
 import com.dessalines.thumbkey.prediction.BinaryDictionaryBridge
 import com.dessalines.thumbkey.prediction.ContactsDictionaryProvider
 import com.dessalines.thumbkey.prediction.LanguageModelSwitcher
@@ -64,6 +77,8 @@ import com.dessalines.thumbkey.utils.toBool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private val WHITESPACE_REGEX = Regex("\\s+")
 
 class IMEService :
     InputMethodService(),
@@ -99,6 +114,19 @@ class IMEService :
         return view
     }
 
+    private fun getRealScreenSize(): Pair<Int, Int> {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val bounds = wm.maximumWindowMetrics.bounds
+            bounds.width() to bounds.height()
+        } else {
+            val point = Point()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealSize(point)
+            point.x to point.y
+        }
+    }
+
     private fun setupAnimationOverlay() {
         removeAnimationOverlay()
 
@@ -119,8 +147,8 @@ class IMEService :
                         onFractureComplete = { id -> fracturingChars.removeAll { it.id == id } },
                         realisticGravityEnabled = (settings?.floatingCharRealisticGravity ?: DEFAULT_FLOATING_CHAR_REALISTIC_GRAVITY).toBool(),
                         animationSpeed = settings?.animationSpeed ?: DEFAULT_ANIMATION_SPEED,
-                        cursorScreenX = cursorScreenX.value,
-                        cursorScreenY = cursorScreenY.value,
+                        cursorXState = cursorScreenX,
+                        cursorYState = cursorScreenY,
                         maxSpeed = (settings?.floatingCharSpeed ?: DEFAULT_FLOATING_CHAR_SPEED).toFloat(),
                         steerAccel = (settings?.floatingCharSteering ?: DEFAULT_FLOATING_CHAR_STEERING) * 100f,
                         velocityDamping = (settings?.floatingCharDamping ?: DEFAULT_FLOATING_CHAR_DAMPING) / 10f,
@@ -131,13 +159,15 @@ class IMEService :
             }
         }
 
+        val (overlayW, overlayH) = getRealScreenSize()
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayW,
+            overlayH,
             WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
             this.token = token
@@ -165,6 +195,188 @@ class IMEService :
         animationOverlay = null
     }
 
+    // --- Tap-to-place state ---
+    private var placementOverlay: ComposeView? = null
+    private var floatingKeyboardPanel: ComposeView? = null
+    private var savedPlacementX: Float? = null
+    private var savedPlacementY: Float? = null
+    private var userDismissed = false
+    // Tracks whether an input session is active. Used to distinguish user-dismiss
+    // (back gesture: onWindowHidden fires while inputActive is still true) from
+    // system-dismiss (app navigation: onFinishInput fires first, setting this false).
+    private var inputActive = false
+
+    private fun setupPlacementOverlay() {
+        removePlacementOverlay()
+
+        val token = window?.window?.decorView?.windowToken ?: return
+        val overlay = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@IMEService)
+            setViewTreeViewModelStoreOwner(this@IMEService)
+            setViewTreeSavedStateRegistryOwner(this@IMEService)
+            setContent {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.3f))
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                val screenX = offset.x
+                                val screenY = offset.y
+                                savedPlacementX = screenX
+                                savedPlacementY = screenY
+                                removePlacementOverlay()
+                                showFloatingKeyboard(screenX, screenY)
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Tap where you want the keyboard",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                    )
+                }
+            }
+        }
+
+        val (overlayW, overlayH) = getRealScreenSize()
+        val params = WindowManager.LayoutParams(
+            overlayW,
+            overlayH,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            this.token = token
+            gravity = Gravity.TOP or Gravity.START
+        }
+
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            wm.addView(overlay, params)
+            placementOverlay = overlay
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to add placement overlay", e)
+        }
+    }
+
+    private fun removePlacementOverlay() {
+        placementOverlay?.let { overlay ->
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                wm.removeViewImmediate(overlay)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to remove placement overlay", e)
+            }
+        }
+        placementOverlay = null
+    }
+
+    private fun showFloatingKeyboard(centerX: Float, centerY: Float) {
+        removeFloatingKeyboard()
+
+        val token = window?.window?.decorView?.windowToken ?: return
+        val app = application as ThumbkeyApplication
+        val settingsRepo = app.appSettingsRepository
+        val clipboardRepo = app.clipboardRepository
+
+        val panel = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(this@IMEService)
+            setViewTreeViewModelStoreOwner(this@IMEService)
+            setViewTreeSavedStateRegistryOwner(this@IMEService)
+            setContent {
+                KeyboardContent(
+                    ctx = this@IMEService,
+                    settingsRepo = settingsRepo,
+                    clipboardRepo = clipboardRepo,
+                    floatingMode = true,
+                )
+            }
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            this.token = token
+            gravity = Gravity.TOP or Gravity.START
+        }
+
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            wm.addView(panel, params)
+            floatingKeyboardPanel = panel
+
+            // Sub-window z-order follows WindowManager addition order.
+            // Re-create the animation overlay so it draws ON TOP of the
+            // keyboard panel — otherwise floating chars render behind the keys.
+            setupAnimationOverlay()
+
+            panel.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+                override fun onLayoutChange(
+                    v: View, l: Int, t: Int, r: Int, b: Int,
+                    ol: Int, ot: Int, or2: Int, ob: Int,
+                ) {
+                    if (r - l > 0 && b - t > 0) {
+                        panel.removeOnLayoutChangeListener(this)
+                        repositionFloatingKeyboard(centerX, centerY)
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to add floating keyboard panel", e)
+        }
+    }
+
+    private fun repositionFloatingKeyboard(centerX: Float, centerY: Float) {
+        val panel = floatingKeyboardPanel ?: return
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val (screenW, screenH) = getRealScreenSize()
+        val panelW = panel.width
+        val panelH = panel.height
+
+        val x = (centerX - panelW / 2f).toInt().coerceIn(0, (screenW - panelW).coerceAtLeast(0))
+        val y = (centerY - panelH / 2f).toInt().coerceIn(0, (screenH - panelH).coerceAtLeast(0))
+
+        try {
+            val lp = panel.layoutParams as WindowManager.LayoutParams
+            lp.x = x
+            lp.y = y
+            wm.updateViewLayout(panel, lp)
+            floatingPanelScreenX = x
+            floatingPanelScreenY = y
+            isFloatingPanelActive = true
+            // updateViewLayout during an active traversal silently skips
+            // scheduleTraversals, leaving mAttachInfo stale.  Post a
+            // requestLayout so the next frame's traversal picks up the
+            // real window position for getLocationOnScreen callers.
+            panel.post { panel.requestLayout() }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to reposition floating keyboard", e)
+        }
+    }
+
+    private fun removeFloatingKeyboard() {
+        floatingKeyboardPanel?.let { panel ->
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                wm.removeViewImmediate(panel)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to remove floating keyboard", e)
+            }
+        }
+        floatingKeyboardPanel = null
+        isFloatingPanelActive = false
+    }
+
     var currentKeyboardDefinition: KeyboardDefinition? = null
     private var clipboardManager: ThumbKeyClipboardManager? = null
 
@@ -183,6 +395,14 @@ class IMEService :
     var touchThroughEnabled = false
     var zeroHeightInsets = false
     var floatingCharEnabled = false
+
+    // Authoritative screen position of the floating keyboard panel.
+    // getLocationOnScreen() is unreliable for TYPE_APPLICATION_PANEL windows
+    // that are repositioned during an active layout traversal (mAttachInfo
+    // never gets updated). These values are set directly from the LayoutParams.
+    var floatingPanelScreenX: Int = 0
+    var floatingPanelScreenY: Int = 0
+    var isFloatingPanelActive: Boolean = false
     val suggestionBarRect = Rect()
     val keyboardKeysRect = Rect()
 
@@ -260,14 +480,45 @@ class IMEService :
             ?.floatingCharMaxCount ?: DEFAULT_FLOATING_CHAR_MAX_COUNT
         val slots = (maxCount - floatingChars.size).coerceAtLeast(0)
         val baseTime = System.nanoTime()
+
+        val cxVal = cursorScreenX.value
+        val cyVal = cursorScreenY.value
+        val hasCursor = !cxVal.isNaN() && !cyVal.isNaN()
+
+        val baseAngle = if (hasCursor) {
+            kotlin.math.atan2(cyVal - startY, cxVal - startX)
+        } else {
+            (-Math.PI / 2.0).toFloat()
+        }
+
+        val coneHalfAngle = Math.toRadians(40.0).toFloat()
+
         chars.take(slots).forEachIndexed { index, ch ->
+            val angleOffset = (kotlin.random.Random.nextFloat() * 2f - 1f) * coneHalfAngle
+            val angle = baseAngle + angleOffset
+
+            val speed = kotlin.random.Random.nextFloat() * 1000f + 1200f
+
+            val velX = kotlin.math.cos(angle) * speed
+            val velY = kotlin.math.sin(angle) * speed
+
+            val jitterX = kotlin.random.Random.nextFloat() * 16f - 8f
+            val jitterY = kotlin.random.Random.nextFloat() * 16f - 8f
+
+            val delay = (kotlin.random.Random.nextFloat() * 15f).toLong()
+            val spin = (kotlin.random.Random.nextFloat() * 400f - 200f)
+
             floatingChars.add(
                 FloatingChar(
                     id = baseTime + index,
                     text = ch,
-                    startX = startX,
-                    startY = startY,
-                    delayMs = index * perCharDelayMs,
+                    startX = startX + jitterX,
+                    startY = startY + jitterY,
+                    initVelX = velX,
+                    initVelY = velY,
+                    delayMs = delay,
+                    isSpray = true,
+                    spinSpeed = spin,
                 ),
             )
         }
@@ -280,7 +531,7 @@ class IMEService :
 
         if (fracturingChars.size >= maxCount + 10) return
 
-        val validChars = deletedText.replace(Regex("\\s+"), "")
+        val validChars = deletedText.replace(WHITESPACE_REGEX, "")
         val slotsRemaining = (maxCount + 10 - fracturingChars.size).coerceAtLeast(0)
         val charsToProcess = validChars.take(minOf(slotsRemaining, 15))
 
@@ -316,6 +567,19 @@ class IMEService :
     override fun onComputeInsets(outInsets: Insets) {
         super.onComputeInsets(outInsets)
 
+        // When tap-to-place is active the real keyboard lives in a separate WM panel.
+        // The IME window only has a 1px placeholder — report the full window height as
+        // the content/visible top so the OS sees zero effective keyboard height.  This
+        // prevents the system from pushing app content off-screen or drawing a filler.
+        if (floatingKeyboardPanel != null || placementOverlay != null) {
+            outInsets.touchableInsets = Insets.TOUCHABLE_INSETS_REGION
+            outInsets.touchableRegion.setEmpty()
+            val h = window?.window?.decorView?.height ?: 0
+            outInsets.contentTopInsets = h
+            outInsets.visibleTopInsets = h
+            return
+        }
+
         if (zeroHeightInsets) {
             val viewHeight = window?.window?.decorView?.height ?: 0
             if (viewHeight > 0) {
@@ -336,6 +600,7 @@ class IMEService :
     }
 
     private var lastLayoutIndex: Int? = null
+    private var cachedInputView: ComposeKeyboardView? = null
 
     /**
      * Called every time the keyboard is brought up.
@@ -343,6 +608,7 @@ class IMEService :
      * Only rebuilds the view if the layout changed or it's the first time.
      */
     override fun onFinishInput() {
+        inputActive = false
         try {
             // Wipe all transient composing/autocorrect state when the current field ends.
             // Without this, state leaks into the next field when the keyboard stays visible
@@ -360,6 +626,7 @@ class IMEService :
         restarting: Boolean,
     ) {
         super.onStartInput(attribute, restarting)
+        inputActive = true
         try {
             // Belt-and-suspenders reset: onFinishInput should have already cleaned up, but
             // if it was skipped (IME restart, restarting=true, etc.) this ensures the engine
@@ -400,13 +667,46 @@ class IMEService :
             Log.w(TAG, "Failed to initialize prediction engine on input start", e)
         }
 
-        // Always set the input view: the system may have destroyed it to save memory when
-        // the keyboard was hidden. Skipping setInputView() leaves an invisible keyboard.
         val app = application as ThumbkeyApplication
-        val currentLayoutIndex = app.appSettingsRepository.appSettings.value?.keyboardLayout
+        val settings = app.appSettingsRepository.appSettings.value
+        val currentLayoutIndex = settings?.keyboardLayout
+        val layoutChanged = currentLayoutIndex != lastLayoutIndex
         lastLayoutIndex = currentLayoutIndex
-        val view = this.setupView()
-        this.setInputView(view)
+
+        val tapToPlaceEnabled = (settings?.tapToPlaceEnabled ?: DEFAULT_TAP_TO_PLACE_ENABLED).toBool()
+
+        if (tapToPlaceEnabled) {
+            // Set a minimal empty input view so the IME framework is satisfied
+            val emptyView = View(this).apply {
+                layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
+            }
+            this.setInputView(emptyView)
+
+            // Ensure keyboard definition is loaded for the floating panel
+            val layoutIndex = settings?.keyboardLayout
+            if (layoutIndex != null) {
+                currentKeyboardDefinition = KeyboardLayout.entries[layoutIndex].keyboardDefinition
+            }
+
+            if (animationOverlay == null) {
+                setupAnimationOverlay()
+            }
+
+            val sx = savedPlacementX
+            val sy = savedPlacementY
+            if (sx != null && sy != null) {
+                showFloatingKeyboard(sx, sy)
+            }
+            // else: wait for onWindowShown to show placement overlay (needs token)
+        } else {
+            if (layoutChanged || cachedInputView == null) {
+                val view = this.setupView()
+                cachedInputView = view
+                this.setInputView(view)
+            } else {
+                this.setInputView(cachedInputView)
+            }
+        }
 
         // Request continuous cursor position updates. Without this, the target app rarely
         // sends CursorAnchorInfo, leaving cursorScreenX/Y stale during passive movement.
@@ -526,6 +826,10 @@ class IMEService :
         clipboardManager?.stopListening()
         clipboardManager = null
         removeAnimationOverlay()
+        removePlacementOverlay()
+        removeFloatingKeyboard()
+        savedPlacementX = null
+        savedPlacementY = null
         super.onDestroy()
         handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
     }
@@ -553,9 +857,11 @@ class IMEService :
             }
 
         // Fix for chat apps backloading messages. Detect if the app suddenly cleared the text field.
-        if (cursorMoved && cursorAnchorInfo.selectionStart == 0 && cursorAnchorInfo.selectionEnd == 0) {
+        // Only check when cursor jumped to position 0 AND was previously elsewhere (avoids IC reads on every update).
+        if (cursorMoved && cursorAnchorInfo.selectionStart == 0 && cursorAnchorInfo.selectionEnd == 0
+            && selectionStart > 0) {
             val ic = currentInputConnection
-            if (ic?.getTextBeforeCursor(1, 0).isNullOrEmpty() && ic?.getTextAfterCursor(1, 0).isNullOrEmpty()) {
+            if (ic?.getTextBeforeCursor(1, 0).isNullOrEmpty()) {
                 predictionEngine.resetForNewInput()
             }
         }
@@ -613,6 +919,18 @@ class IMEService :
         if (animationOverlay == null) {
             setupAnimationOverlay()
         }
+
+        val app = application as ThumbkeyApplication
+        val tapToPlaceEnabled = (app.appSettingsRepository.appSettings.value?.tapToPlaceEnabled
+            ?: DEFAULT_TAP_TO_PLACE_ENABLED).toBool()
+        if (tapToPlaceEnabled && savedPlacementX == null && placementOverlay == null && floatingKeyboardPanel == null) {
+            setupPlacementOverlay()
+        }
+    }
+
+    override fun requestHideSelf(flags: Int) {
+        userDismissed = true
+        super.requestHideSelf(flags)
     }
 
     override fun onWindowHidden() {
@@ -622,6 +940,23 @@ class IMEService :
             Log.w(TAG, "Failed to clear suggestions on window hidden", e)
         }
         currentKeyboardDefinition?.settings?.textProcessor?.handleFinishInput(this)
+
+        removePlacementOverlay()
+        removeFloatingKeyboard()
+
+        // Detect user-initiated dismiss (back gesture/button) vs system-initiated
+        // (app navigation, field lost focus). Two signals:
+        //   1. requestHideSelf() was called → userDismissed is true
+        //   2. Input session is still active → onFinishInput hasn't fired yet,
+        //      meaning the window hid before the field ended (user back-swipe)
+        // For system closes, onFinishInput fires first (inputActive becomes false),
+        // THEN onWindowHidden fires.
+        if (userDismissed || inputActive) {
+            savedPlacementX = null
+            savedPlacementY = null
+        }
+        userDismissed = false
+
         super.onWindowHidden()
     }
 

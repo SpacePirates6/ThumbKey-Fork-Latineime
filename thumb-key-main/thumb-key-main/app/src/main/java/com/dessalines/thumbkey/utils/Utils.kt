@@ -64,6 +64,13 @@ const val TAG = "com.thumbkey"
 const val IME_ACTION_CUSTOM_LABEL = EditorInfo.IME_MASK_ACTION + 1
 const val ANIMATION_SPEED = 300
 
+private val WORD_BEFORE_CURSOR_PATTERN = Regex("(\\w+\\W?|[^\\s\\w]+)?\\s*$")
+private val WORD_AFTER_CURSOR_PATTERN = Regex("^\\s?(\\w+\\W?|[^\\s\\w]+|\\s+)")
+private val LINE_START_PATTERN = Regex("^[^\\n\\r]*\\Z", RegexOption.MULTILINE)
+private val LINE_END_PATTERN = Regex("\\A[^\\n\\r]*(\\n|\\r)?", RegexOption.MULTILINE)
+private val TRAILING_WHITESPACE_PATTERN: Pattern = Pattern.compile("\\s+$")
+private val SMART_QUOTE_PATTERN = Regex("\\S")
+
 fun accelCurve(
     offset: Float,
     threshold: Float,
@@ -354,7 +361,6 @@ fun performKeyAction(
     when (action) {
         is KeyAction.CommitText -> {
             val text = action.text
-            Log.d(TAG, "committing key text: $text")
             ime.ignoreNextCursorMove()
             val ic = ime.currentInputConnection
             val pe = ime.predictionEngine
@@ -420,7 +426,6 @@ fun performKeyAction(
 
         is KeyAction.SendEvent -> {
             val ev = action.event
-            Log.d(TAG, "sending key event: $ev")
             keyboardSettings.textProcessor?.handleKeyEvent(ime, ev)
                 ?: ime.currentInputConnection.sendKeyEvent(ev)
             try { ime.predictionEngine.clearSuggestions() } catch (e: Exception) {
@@ -435,18 +440,18 @@ fun performKeyAction(
             val pe = ime.predictionEngine
             val ic = ime.currentInputConnection
 
-            // PDC shootdown: grab char before delete for debris+tracer effect
-            val deletedChar = ic?.getTextBeforeCursor(1, 0)?.toString()
-            if (deletedChar != null && deletedChar.isNotEmpty()) {
-                val cx = ime.cursorScreenX.value
-                val cy = ime.cursorScreenY.value
-                if (!cx.isNaN() && !cy.isNaN()) {
-                    ime.emitPdcShootdown(deletedChar, cx, cy)
+            // Single IC read reused for PDC shootdown and composing check
+            if (ime.floatingCharEnabled) {
+                val deletedChar = ic?.getTextBeforeCursor(1, 0)?.toString()
+                if (!deletedChar.isNullOrEmpty()) {
+                    val cx = ime.cursorScreenX.value
+                    val cy = ime.cursorScreenY.value
+                    if (!cx.isNaN() && !cy.isNaN()) {
+                        ime.emitPdcShootdown(deletedChar, cx, cy)
+                    }
                 }
             }
 
-            // LatinIME approach: if composing is active, delete within the span directly
-            // (no finishComposing → avoids the commit-then-reinsert duplication bug).
             val handledInComposing = try {
                 pe.handleBackspaceWhileComposing(ic)
             } catch (e: Exception) {
@@ -455,8 +460,6 @@ fun performKeyAction(
             }
 
             if (!handledInComposing) {
-                // Not composing — commit any composing text first, then undo autocorrect or
-                // send a normal delete key event.
                 pe.finishComposing(ic)
                 val didUndo = try {
                     pe.onBackspace(ime)
@@ -487,7 +490,7 @@ fun performKeyAction(
             keyboardSettings.textProcessor?.handleFinishInput(ime)
             val deletedText = getTextToDeleteBeforeCursor(ime)
             deleteWordBeforeCursor(ime)
-            if (deletedText.isNotEmpty()) {
+            if (ime.floatingCharEnabled && deletedText.isNotEmpty()) {
                 val cx = ime.cursorScreenX.value
                 val cy = ime.cursorScreenY.value
                 if (!cx.isNaN() && !cy.isNaN()) {
@@ -550,8 +553,7 @@ fun performKeyAction(
 
             val textBeforeCursor = ic.getTextBeforeCursor(distanceBack, 0)?.toString() ?: ""
 
-            val trailingWhitespacePattern = Pattern.compile("\\s+$")
-            val matcher = trailingWhitespacePattern.matcher(textBeforeCursor)
+            val matcher = TRAILING_WHITESPACE_PATTERN.matcher(textBeforeCursor)
 
             if (matcher.find()) {
                 ic.deleteSurroundingText(matcher.end() - matcher.start(), 0)
@@ -561,7 +563,7 @@ fun performKeyAction(
 
         is KeyAction.SmartQuotes -> {
             val textBeforeCursor = ime.currentInputConnection.getTextBeforeCursor(1, 0)?.toString() ?: ""
-            val textNew = if (textBeforeCursor.matches(Regex("\\S"))) action.end else action.start
+            val textNew = if (textBeforeCursor.matches(SMART_QUOTE_PATTERN)) action.end else action.start
             ime.currentInputConnection.commitText(textNew, 1)
         }
 
@@ -1648,15 +1650,13 @@ fun isPasswordField(ime: IMEService): Boolean {
 
 fun getTextToDeleteBeforeCursor(ime: IMEService): String {
     val wordsBeforeCursor = ime.currentInputConnection.getTextBeforeCursor(500, 0)?.toString() ?: ""
-    val pattern = Regex("(\\w+\\W?|[^\\s\\w]+)?\\s*$")
-    return pattern.find(wordsBeforeCursor)?.value ?: ""
+    return WORD_BEFORE_CURSOR_PATTERN.find(wordsBeforeCursor)?.value ?: ""
 }
 
 fun deleteWordBeforeCursor(ime: IMEService) {
     val wordsBeforeCursor = ime.currentInputConnection.getTextBeforeCursor(500, 0)
 
-    val pattern = Regex("(\\w+\\W?|[^\\s\\w]+)?\\s*$")
-    val lastWordLength = wordsBeforeCursor?.let { pattern.find(it)?.value?.length } ?: 0
+    val lastWordLength = wordsBeforeCursor?.let { WORD_BEFORE_CURSOR_PATTERN.find(it)?.value?.length } ?: 0
 
     ime.currentInputConnection.deleteSurroundingText(lastWordLength, 0)
 }
@@ -1664,8 +1664,7 @@ fun deleteWordBeforeCursor(ime: IMEService) {
 fun deleteWordAfterCursor(ime: IMEService) {
     val wordsAfterCursor = ime.currentInputConnection.getTextAfterCursor(500, 0)
 
-    val pattern = Regex("^\\s?(\\w+\\W?|[^\\s\\w]+|\\s+)")
-    val nextWordLength = wordsAfterCursor?.let { pattern.find(it)?.value?.length } ?: 0
+    val nextWordLength = wordsAfterCursor?.let { WORD_AFTER_CURSOR_PATTERN.find(it)?.value?.length } ?: 0
 
     ime.currentInputConnection.deleteSurroundingText(0, nextWordLength)
 }
@@ -1682,8 +1681,7 @@ fun moveCursor(
 fun previousWordBeforeCursor(ime: IMEService) {
     val wordsBeforeCursor = ime.currentInputConnection.getTextBeforeCursor(500, 0)
 
-    val pattern = Regex("(\\w+\\W?|[^\\s\\w]+)?\\s*$")
-    val lastWordLength = wordsBeforeCursor?.let { pattern.find(it)?.value?.length } ?: 0
+    val lastWordLength = wordsBeforeCursor?.let { WORD_BEFORE_CURSOR_PATTERN.find(it)?.value?.length } ?: 0
 
     moveCursor(ime, -lastWordLength)
 }
@@ -1691,28 +1689,24 @@ fun previousWordBeforeCursor(ime: IMEService) {
 fun nextWordAfterCursor(ime: IMEService) {
     val wordsAfterCursor = ime.currentInputConnection.getTextAfterCursor(500, 0)
 
-    val pattern = Regex("^\\s?(\\w+\\W?|[^\\s\\w]+|\\s+)")
-    val nextWordLength = wordsAfterCursor?.let { pattern.find(it)?.value?.length } ?: 0
+    val nextWordLength = wordsAfterCursor?.let { WORD_AFTER_CURSOR_PATTERN.find(it)?.value?.length } ?: 0
 
     moveCursor(ime, nextWordLength)
 }
 
 fun selectLineWithCursor(ime: IMEService) {
-    // Find line start
     val wordsBeforeCursor = ime.currentInputConnection.getTextBeforeCursor(500, 0)
     if (wordsBeforeCursor?.length ?: 0 != 0) {
         val lastChar = wordsBeforeCursor?.last() ?: ' '
         if (!(lastChar == '\n' || lastChar == '\r')) {
-            val patternStart = Regex("^[^\\n\\r]*\\Z", RegexOption.MULTILINE)
-            val previousLineStart = wordsBeforeCursor?.let { patternStart.find(it)?.value?.length } ?: 0
+            val previousLineStart = wordsBeforeCursor?.let { LINE_START_PATTERN.find(it)?.value?.length } ?: 0
 
             moveCursor(ime, -previousLineStart)
         }
     }
 
     val wordsAfterCursor = ime.currentInputConnection.getTextAfterCursor(500, 0)
-    val patternLine = Regex("\\A[^\\n\\r]*(\\n|\\r)?", RegexOption.MULTILINE)
-    val lineLength = wordsAfterCursor?.let { patternLine.find(it)?.value?.length } ?: 0
+    val lineLength = wordsAfterCursor?.let { LINE_END_PATTERN.find(it)?.value?.length } ?: 0
 
     val selection = startSelection(ime)
     selection.right(lineLength)

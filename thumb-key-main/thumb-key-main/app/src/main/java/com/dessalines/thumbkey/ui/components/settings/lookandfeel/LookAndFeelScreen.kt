@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Mail
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.Padding
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.PinDrop
 import androidx.compose.material.icons.outlined.RoundedCorner
 import androidx.compose.material.icons.outlined.VerticalAlignTop
 import androidx.compose.material.icons.outlined.Vibration
@@ -57,6 +58,7 @@ import com.dessalines.thumbkey.db.DEFAULT_AUTO_SIZE_KEYS
 import com.dessalines.thumbkey.db.DEFAULT_ENABLE_KEY_FADEOUT
 import com.dessalines.thumbkey.db.DEFAULT_KEY_FADEOUT_TIME_MS
 import com.dessalines.thumbkey.db.DEFAULT_KEYBOARD_OPACITY
+import com.dessalines.thumbkey.db.DEFAULT_TAP_TO_PLACE_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_TOUCH_THROUGH_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_BACKDROP_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_DISABLE_FULLSCREEN_EDITOR
@@ -166,6 +168,8 @@ fun LookAndFeelScreen(
 
     var touchThroughEnabledState = (settings?.touchThroughEnabled ?: DEFAULT_TOUCH_THROUGH_ENABLED).toBool()
 
+    var tapToPlaceEnabledState = (settings?.tapToPlaceEnabled ?: DEFAULT_TAP_TO_PLACE_ENABLED).toBool()
+
     var disableFullscreenEditorState = (settings?.disableFullscreenEditor ?: DEFAULT_DISABLE_FULLSCREEN_EDITOR).toBool()
 
     var helperFullOpacityState = (settings?.helperFullOpacity ?: DEFAULT_HELPER_FULL_OPACITY).toBool()
@@ -236,6 +240,7 @@ fun LookAndFeelScreen(
                 floatingCharImpactVelocity = floatingCharImpactVelocityState.toInt(),
                 enableKeyFadeout = enableKeyFadeoutState.toInt(),
                 keyFadeoutTimeMs = keyFadeoutTimeState.toInt(),
+                tapToPlaceEnabled = tapToPlaceEnabledState.toInt(),
             ),
         )
     }
@@ -513,6 +518,26 @@ fun LookAndFeelScreen(
                         icon = {
                             Icon(
                                 imageVector = Icons.Outlined.TouchApp,
+                                contentDescription = null,
+                            )
+                        },
+                    )
+
+                    SwitchPreference(
+                        value = tapToPlaceEnabledState,
+                        onValueChange = {
+                            tapToPlaceEnabledState = it
+                            updateLookAndFeel()
+                        },
+                        title = {
+                            Text(stringResource(R.string.tap_to_place))
+                        },
+                        summary = {
+                            Text(stringResource(R.string.tap_to_place_summary))
+                        },
+                        icon = {
+                            Icon(
+                                imageVector = Icons.Outlined.PinDrop,
                                 contentDescription = null,
                             )
                         },

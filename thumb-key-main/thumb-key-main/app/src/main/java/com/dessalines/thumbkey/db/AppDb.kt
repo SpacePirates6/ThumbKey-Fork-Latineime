@@ -81,6 +81,7 @@ const val DEFAULT_FLOATING_CHAR_REALISTIC_GRAVITY = 0  // use accelerometer for 
 const val DEFAULT_FLOATING_CHAR_IMPACT_VELOCITY = 0  // infer thumb velocity from last-impact-to-current-impact for non-swipe taps
 const val DEFAULT_ENABLE_KEY_FADEOUT = 0
 const val DEFAULT_KEY_FADEOUT_TIME_MS = 1000
+const val DEFAULT_TAP_TO_PLACE_ENABLED = 0
 const val DEFAULT_CLIPBOARD_HISTORY_ENABLED = 0
 const val DEFAULT_CLIPBOARD_AUTO_CLEANUP_ENABLED = 1
 const val DEFAULT_CLIPBOARD_CLEANUP_AFTER_MINUTES = 120
@@ -415,6 +416,11 @@ data class AppSettings(
         defaultValue = DEFAULT_KEY_FADEOUT_TIME_MS.toString(),
     )
     val keyFadeoutTimeMs: Int = DEFAULT_KEY_FADEOUT_TIME_MS,
+    @ColumnInfo(
+        name = "tap_to_place_enabled",
+        defaultValue = DEFAULT_TAP_TO_PLACE_ENABLED.toString(),
+    )
+    val tapToPlaceEnabled: Int = DEFAULT_TAP_TO_PLACE_ENABLED,
 )
 
 data class LayoutsUpdate(
@@ -563,6 +569,8 @@ data class LookAndFeelUpdate(
     val enableKeyFadeout: Int,
     @ColumnInfo(name = "key_fadeout_time_ms")
     val keyFadeoutTimeMs: Int,
+    @ColumnInfo(name = "tap_to_place_enabled")
+    val tapToPlaceEnabled: Int,
 )
 
 data class BehaviorUpdate(
@@ -712,7 +720,7 @@ class AppSettingsRepository(
 }
 
 @Database(
-    version = 32,
+    version = 33,
     entities = [AppSettings::class],
     exportSchema = true,
 )
@@ -766,6 +774,7 @@ abstract class AppDB : RoomDatabase() {
                             MIGRATION_29_30,
                             MIGRATION_30_31,
                             MIGRATION_31_32,
+                            MIGRATION_32_33,
                         )
                         // Necessary because it can't insert data on creation
                         .addCallback(

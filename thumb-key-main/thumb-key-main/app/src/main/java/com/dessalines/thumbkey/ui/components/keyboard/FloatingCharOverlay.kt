@@ -9,11 +9,14 @@ import android.hardware.SensorManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
@@ -22,32 +25,26 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.offset
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.isActive
 import kotlin.math.sqrt
 import kotlin.random.Random
@@ -108,6 +105,8 @@ class FloatingChar(
     val initVelX: Float = 0f,
     val initVelY: Float = 0f,
     val delayMs: Long = 0,
+    val isSpray: Boolean = false,
+    val spinSpeed: Float = 0f,
 ) {
     var posX by mutableFloatStateOf(startX)
     var posY by mutableFloatStateOf(startY)
@@ -137,7 +136,7 @@ fun rememberAccelerometerSensor(enabled: Boolean): androidx.compose.runtime.Stat
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
 
-        sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_GAME)
+        sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
         onDispose { sensorManager.unregisterListener(listener) }
     }
 
@@ -151,8 +150,8 @@ fun FloatingCharOverlay(
     onFractureComplete: (Long) -> Unit,
     realisticGravityEnabled: Boolean = false,
     animationSpeed: Int,
-    cursorScreenX: Float,
-    cursorScreenY: Float,
+    cursorXState: State<Float>,
+    cursorYState: State<Float>,
     maxSpeed: Float,
     steerAccel: Float,
     velocityDamping: Float,
@@ -162,6 +161,7 @@ fun FloatingCharOverlay(
     var overlayTopLeft by remember { mutableStateOf(Offset.Zero) }
     var overlaySize by remember { mutableStateOf(IntSize.Zero) }
     val textMeasurer = rememberTextMeasurer()
+    val overlayView = LocalView.current
 
     val configuration = LocalContext.current.resources.configuration
     val isSystemDarkMode = (configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
@@ -180,8 +180,11 @@ fun FloatingCharOverlay(
         modifier = Modifier
             .fillMaxSize()
             .onGloballyPositioned { coordinates ->
-                overlayTopLeft = coordinates.positionOnScreen()
-                overlaySize = coordinates.size
+                val windowPos = coordinates.localToWindow(Offset.Zero)
+                val loc = IntArray(2)
+                overlayView.getLocationOnScreen(loc)
+                overlayTopLeft = Offset(loc[0] + windowPos.x, loc[1] + windowPos.y)
+                overlaySize = IntSize(overlayView.width, overlayView.height)
             },
     ) {
         FractureOverlay(
@@ -196,15 +199,19 @@ fun FloatingCharOverlay(
             realisticGravityEnabled = realisticGravityEnabled,
         )
 
-        floatingChars.toList().forEach { fc ->
+        for (i in 0 until floatingChars.size) {
+            val fc = floatingChars.getOrNull(i) ?: continue
             key(fc.id) {
+                val onComplete = remember<() -> Unit>(fc.id) {
+                    { floatingChars.removeAll { it.id == fc.id } }
+                }
                 FloatingCharItem(
                     fc = fc,
                     overlayTopLeft = overlayTopLeft,
                     overlayWidth = overlayWidth,
                     overlayHeight = overlayHeight,
-                    cursorScreenX = cursorScreenX,
-                    cursorScreenY = cursorScreenY,
+                    cursorXState = cursorXState,
+                    cursorYState = cursorYState,
                     maxSpeed = maxSpeed,
                     steerAccel = steerAccel,
                     velocityDamping = velocityDamping,
@@ -212,7 +219,7 @@ fun FloatingCharOverlay(
                     maxTime = maxTime,
                     charColor = charColor,
                     shadowColor = shadowColor,
-                    onComplete = { floatingChars.removeAll { it.id == fc.id } },
+                    onComplete = onComplete,
                 )
             }
         }
@@ -235,6 +242,11 @@ private fun FractureOverlay(
 ) {
     val hardwareGravity by rememberAccelerometerSensor(enabled = realisticGravityEnabled)
     val hasChars by remember { derivedStateOf { fracturingChars.isNotEmpty() } }
+    val currentOverlayTopLeft by rememberUpdatedState(overlayTopLeft)
+    val currentOverlayWidth by rememberUpdatedState(overlayWidth)
+    val currentOverlayHeight by rememberUpdatedState(overlayHeight)
+
+    val deadIdBuffer = remember { mutableListOf<Long>() }
 
     LaunchedEffect(hasChars, realisticGravityEnabled) {
         if (!hasChars) return@LaunchedEffect
@@ -251,14 +263,16 @@ private fun FractureOverlay(
                 val gravityX = if (realisticGravityEnabled) hardwareGravity.x * 150f else 0f
                 val gravityY = if (realisticGravityEnabled) hardwareGravity.y * 150f else GRAVITY
 
-                val bounceLeft = overlayTopLeft.x
-                val bounceRight = overlayTopLeft.x + overlayWidth
-                val bounceTop = overlayTopLeft.y
-                val bounceBottom = overlayTopLeft.y + overlayHeight
+                val bounceLeft = currentOverlayTopLeft.x
+                val bounceRight = currentOverlayTopLeft.x + currentOverlayWidth
+                val bounceTop = currentOverlayTopLeft.y
+                val bounceBottom = currentOverlayTopLeft.y + currentOverlayHeight
                 val bounceDamping = 0.6f
 
-                val deadIds = mutableListOf<Long>()
-                for (char in fracturingChars.toList()) {
+                deadIdBuffer.clear()
+                val size = fracturingChars.size
+                for (i in 0 until size) {
+                    val char = fracturingChars.getOrNull(i) ?: continue
                     if (char.isDead) continue
 
                     for (frag in char.fragments) {
@@ -289,61 +303,60 @@ private fun FractureOverlay(
                     char.alpha -= 0.8f * dt
                     if (char.alpha <= 0f) {
                         char.isDead = true
-                        deadIds.add(char.id)
+                        deadIdBuffer.add(char.id)
                     }
                 }
-                for (id in deadIds) onCharAnimationFinished(id)
+                for (id in deadIdBuffer) onCharAnimationFinished(id)
             }
         }
     }
 
+    val measuredChars = remember { mutableMapOf<String, androidx.compose.ui.text.TextLayoutResult>() }
+
     Canvas(modifier = Modifier.fillMaxSize()) {
         val shadowOffset = 2f
-        for (char in fracturingChars) {
+        val charCount = fracturingChars.size
+        for (i in 0 until charCount) {
+            val char = fracturingChars.getOrNull(i) ?: continue
             if (char.isDead) continue
 
-            val shadowLayoutResult = textMeasurer.measure(
-                text = char.text,
-                style = char.style.copy(color = shadowColor.copy(alpha = char.alpha * 0.8f)),
-            )
-            val textLayoutResult = textMeasurer.measure(
-                text = char.text,
-                style = char.style.copy(color = color.copy(alpha = char.alpha)),
-            )
-            val width = textLayoutResult.size.width.toFloat()
-            val height = textLayoutResult.size.height.toFloat()
+            val baseLayout = measuredChars.getOrPut(char.text) {
+                textMeasurer.measure(text = char.text, style = char.style)
+            }
+            val width = baseLayout.size.width.toFloat()
+            val height = baseLayout.size.height.toFloat()
 
             for (frag in char.fragments) {
-                val clipRectPx = Rect(
-                    left = frag.clipRect.left * width,
-                    top = frag.clipRect.top * height,
-                    right = frag.clipRect.right * width,
-                    bottom = frag.clipRect.bottom * height,
-                )
-                val clipPath = Path().apply { addRect(clipRectPx) }
-                val pivot = Offset(
-                    clipRectPx.center.x,
-                    clipRectPx.center.y,
-                )
+                val clipLeft = frag.clipRect.left * width
+                val clipTop = frag.clipRect.top * height
+                val clipRight = frag.clipRect.right * width
+                val clipBottom = frag.clipRect.bottom * height
+                val pivotX = (clipLeft + clipRight) * 0.5f
+                val pivotY = (clipTop + clipBottom) * 0.5f
+                val pivot = Offset(pivotX, pivotY)
 
                 val localX = frag.currentX - overlayTopLeft.x
                 val localY = frag.currentY - overlayTopLeft.y
 
                 translate(left = localX + shadowOffset, top = localY + shadowOffset) {
                     rotate(degrees = frag.rotation, pivot = pivot) {
-                        clipPath(clipPath) {
-                            drawText(shadowLayoutResult)
+                        clipRect(clipLeft, clipTop, clipRight, clipBottom) {
+                            drawText(baseLayout, alpha = char.alpha * 0.8f)
                         }
                     }
                 }
                 translate(left = localX, top = localY) {
                     rotate(degrees = frag.rotation, pivot = pivot) {
-                        clipPath(clipPath) {
-                            drawText(textLayoutResult)
+                        clipRect(clipLeft, clipTop, clipRight, clipBottom) {
+                            drawText(baseLayout, alpha = char.alpha)
                         }
                     }
                 }
             }
+        }
+
+        if (deadIdBuffer.isNotEmpty()) {
+            measuredChars.keys.retainAll(fracturingChars.mapNotNullTo(HashSet()) { if (!it.isDead) it.text else null })
         }
     }
 }
@@ -356,8 +369,8 @@ private fun FloatingCharItem(
     overlayTopLeft: Offset,
     overlayWidth: Float,
     overlayHeight: Float,
-    cursorScreenX: Float,
-    cursorScreenY: Float,
+    cursorXState: State<Float>,
+    cursorYState: State<Float>,
     maxSpeed: Float,
     steerAccel: Float,
     velocityDamping: Float,
@@ -367,25 +380,30 @@ private fun FloatingCharItem(
     shadowColor: Color,
     onComplete: () -> Unit,
 ) {
-    val latestCursorX by rememberUpdatedState(cursorScreenX)
-    val latestCursorY by rememberUpdatedState(cursorScreenY)
+    val latestCursorX by cursorXState
+    val latestCursorY by cursorYState
+    val currentOverlayTopLeft by rememberUpdatedState(overlayTopLeft)
+    val currentOverlayWidth by rememberUpdatedState(overlayWidth)
+    val currentOverlayHeight by rememberUpdatedState(overlayHeight)
 
     LaunchedEffect(fc.id) {
         if (fc.delayMs > 0) {
             kotlinx.coroutines.delay(fc.delayMs)
         }
 
-        val initTargetX = if (!latestCursorX.isNaN()) latestCursorX else fc.startX
-        val initTargetY = if (!latestCursorY.isNaN()) latestCursorY else fc.startY - 400f
+        // When cursor position is unknown, target the upper-third center of
+        // the screen instead of a hardcoded offset.  The old -400px fallback
+        // sends chars the wrong direction in freeform keyboard placement.
+        val fallbackTargetX = currentOverlayTopLeft.x + currentOverlayWidth / 2f
+        val fallbackTargetY = currentOverlayTopLeft.y + currentOverlayHeight / 3f
+
+        val initTargetX = if (!latestCursorX.isNaN()) latestCursorX else fallbackTargetX
+        val initTargetY = if (!latestCursorY.isNaN()) latestCursorY else fallbackTargetY
 
         val dx0 = initTargetX - fc.startX
         val dy0 = initTargetY - fc.startY
         val dist0 = sqrt(dx0 * dx0 + dy0 * dy0).coerceAtLeast(1f)
 
-        val bounceLeft = overlayTopLeft.x
-        val bounceRight = overlayTopLeft.x + overlayWidth
-        val bounceTop = overlayTopLeft.y
-        val bounceBottom = overlayTopLeft.y + overlayHeight
         val bounceDamping = 0.6f
 
         var velX = fc.initVelX
@@ -394,6 +412,13 @@ private fun FloatingCharItem(
             val launchSpeed = (dist0 * 5f).coerceIn(600f, maxSpeed)
             velX = dx0 / dist0 * launchSpeed
             velY = dy0 / dist0 * launchSpeed
+        } else if (fc.isSpray) {
+            val sprayMaxSpeed = maxSpeed * 1.8f
+            val speed = sqrt(velX * velX + velY * velY)
+            if (speed > sprayMaxSpeed) {
+                velX = velX / speed * sprayMaxSpeed
+                velY = velY / speed * sprayMaxSpeed
+            }
         } else {
             velX *= dragVelScale
             velY *= dragVelScale
@@ -406,6 +431,7 @@ private fun FloatingCharItem(
 
         var prevNanos = 0L
         var totalTime = 0f
+        val sprayFreeFlight = 0.08f
 
         while (isActive && fc.active) {
             val nanos = withFrameNanos { it }
@@ -417,8 +443,8 @@ private fun FloatingCharItem(
             prevNanos = nanos
             totalTime += dt
 
-            val targetX = if (!latestCursorX.isNaN()) latestCursorX else fc.startX
-            val targetY = if (!latestCursorY.isNaN()) latestCursorY else fc.startY - 400f
+            val targetX = if (!latestCursorX.isNaN()) latestCursorX else fallbackTargetX
+            val targetY = if (!latestCursorY.isNaN()) latestCursorY else fallbackTargetY
 
             val toX = targetX - fc.posX
             val toY = targetY - fc.posY
@@ -432,14 +458,26 @@ private fun FloatingCharItem(
 
             val steerX = toX / dist
             val steerY = toY / dist
-            velX += steerX * steerAccel * dt
-            velY += steerY * steerAccel * dt
+            if (fc.isSpray && totalTime < sprayFreeFlight) {
+                val rampT = totalTime / sprayFreeFlight
+                val spraySteer = steerAccel * (0.2f + 0.8f * rampT)
+                velX += steerX * spraySteer * dt
+                velY += steerY * spraySteer * dt
+            } else {
+                velX += steerX * steerAccel * dt
+                velY += steerY * steerAccel * dt
+            }
 
             val dampFactor = 1f - velocityDamping * dt
             velX *= dampFactor
             velY *= dampFactor
 
-            val distanceCap = (dist * 4f).coerceAtMost(maxSpeed)
+            val effectiveMaxSpeed = if (fc.isSpray && totalTime < sprayFreeFlight) {
+                maxSpeed * 2f
+            } else {
+                maxSpeed
+            }
+            val distanceCap = (dist * 4f).coerceAtMost(effectiveMaxSpeed)
             val speed = sqrt(velX * velX + velY * velY)
             if (speed > distanceCap) {
                 val scale = distanceCap / speed
@@ -450,10 +488,19 @@ private fun FloatingCharItem(
             fc.posX += velX * dt
             fc.posY += velY * dt
 
-            if (fc.posX < bounceLeft) { fc.posX = bounceLeft; velX = -velX * bounceDamping }
-            if (fc.posX > bounceRight) { fc.posX = bounceRight; velX = -velX * bounceDamping }
-            if (fc.posY < bounceTop) { fc.posY = bounceTop; velY = -velY * bounceDamping }
-            if (fc.posY > bounceBottom) { fc.posY = bounceBottom; velY = -velY * bounceDamping }
+            if (fc.spinSpeed != 0f) {
+                val spinDamp = if (totalTime > sprayFreeFlight) 0.92f else 1f
+                fc.rotation += fc.spinSpeed * spinDamp * dt
+            }
+
+            val bL = currentOverlayTopLeft.x
+            val bR = currentOverlayTopLeft.x + currentOverlayWidth
+            val bT = currentOverlayTopLeft.y
+            val bB = currentOverlayTopLeft.y + currentOverlayHeight
+            if (fc.posX < bL) { fc.posX = bL; velX = -velX * bounceDamping }
+            if (fc.posX > bR) { fc.posX = bR; velX = -velX * bounceDamping }
+            if (fc.posY < bT) { fc.posY = bT; velY = -velY * bounceDamping }
+            if (fc.posY > bB) { fc.posY = bB; velY = -velY * bounceDamping }
 
             fc.alpha = (dist / (dist0 * 0.3f)).coerceIn(0f, 1f)
         }

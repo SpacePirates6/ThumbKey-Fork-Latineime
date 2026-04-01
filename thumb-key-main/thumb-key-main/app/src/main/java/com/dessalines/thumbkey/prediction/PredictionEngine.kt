@@ -167,6 +167,8 @@ class PredictionEngine(private val context: Context) :
     private var recorrectionWord: String? = null
     private var recorrectionStart: Int = -1
     private var recorrectionEnd: Int = -1
+    private var pendingRecorrection: Runnable? = null
+    private val recorrectionDebounceMs = 250L
 
     val isInRecorrectionMode: Boolean get() = recorrectionWord != null
 
@@ -195,11 +197,12 @@ class PredictionEngine(private val context: Context) :
     private var pendingQuery: Runnable? = null
 
     /**
-     * Adaptive debounce: starts at 40ms and adjusts based on how fast
-     * prediction actually completes, matching FUTO's approach. Range: 16-60ms.
+     * Adaptive debounce: starts at 100ms and adjusts based on how fast
+     * prediction actually completes. Range: 80-200ms. Higher floor than FUTO
+     * to keep typing completely non-blocking on ThumbKey's 3×3 grid.
      */
-    private var queryDelayMs = 40L
-    private var avgPredictionTimeMs = 40L
+    private var queryDelayMs = 100L
+    private var avgPredictionTimeMs = 80L
 
     /** Hard timeout for the LLM native call. Falls back to dict-only if exceeded. */
     private val lmTimeoutMs = 350L
@@ -392,21 +395,19 @@ class PredictionEngine(private val context: Context) :
             lastSpaceTimestamp = 0L
         }
 
-        // Never auto-replace on space — the user accepts suggestions via
-        // the spacebar slide-up gesture (AcceptSuggestion) instead.
         if (separator == " " && originalWord.isNotBlank()) {
             phantomSpacePending = true
         }
 
-        // Record the typed word for learning (background)
+        // Record the typed word for learning — use cached text to avoid IC reads
         if (originalWord.isNotBlank() && !suppressLearning) {
             val wordCopy = originalWord
-            val contextSnapshot = ic?.getTextBeforeCursor(150, 0)?.toString() ?: ""
+            val cachedContext = lastTextBeforeCursor
             dictExecutor.submit {
-                val prevWord = extractPreviousWord(contextSnapshot)
+                val prevWord = extractPreviousWord(cachedContext)
                 userHistoryDictionary?.recordWord(wordCopy, prevWord)
-                val priorContext = contextSnapshot
-                    .dropLast(wordCopy.length.coerceAtMost(contextSnapshot.length))
+                val priorContext = cachedContext
+                    .dropLast(wordCopy.length.coerceAtMost(cachedContext.length))
                     .trimEnd().takeLast(100)
                 personalizationTrainer?.addTrainingExample(priorContext, wordCopy)
             }
@@ -538,10 +539,27 @@ class PredictionEngine(private val context: Context) :
                 }
             }
         } else {
+            // Next-word prediction: no partial word to replace, insert directly
+            ic.beginBatchEdit()
+            ic.commitText(selected.word, 1)
+            ic.commitText(" ", 1)
+            ic.endBatchEdit()
+
+            if (!suppressLearning) {
+                val insertedWord = selected.word
+                val textBefore = ic.getTextBeforeCursor(500, 0)?.toString() ?: ""
+                dictExecutor.submit {
+                    val prevWord = extractPreviousWord(textBefore)
+                    userHistoryDictionary?.recordWord(insertedWord, prevWord)
+                }
+            }
+
             lastAutocorrect = null
         }
 
         clearSuggestions()
+        phantomSpacePending = true
+        onKeyAction(ime)
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -564,11 +582,11 @@ class PredictionEngine(private val context: Context) :
     private fun queryCurrentWord(ime: IMEService) {
         try {
             val ic = ime.currentInputConnection ?: return
-            val word = currentWordBeforeCursorRobust(ic)
 
-            // KILL THE DESYNC LOOP: If the text in the editor does not match our internal
-            // state, the editor has dropped the composing span. We MUST abort composing here
-            // rather than adopting the duplicated text (which would fuel exponential growth).
+            // Single IC read: extract both the full context and the current word from one call
+            val textBefore = ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
+            val word = textBefore.takeLastWhile { it.isLetter() || it == '\'' }
+
             if (isComposing && word != wordComposer.typedWord) {
                 isComposing = false
                 wordComposer.reset()
@@ -597,7 +615,6 @@ class PredictionEngine(private val context: Context) :
                 return
             }
 
-            val textBefore = ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
             lastTextBeforeCursor = textBefore
 
             val touchX = if (!isPostSpace && touchXBuffer.size == word.length && touchXBuffer.isNotEmpty()) {
@@ -647,16 +664,6 @@ class PredictionEngine(private val context: Context) :
                                 touchY?.let { y -> x to y }
                             } ?: if (!isPostSpace) proxModel?.getWordCoordinates(word) else null
 
-                            val prevWordsList = if (textBefore.isNotBlank()) {
-                                val allWords = textBefore.trim().split(WHITESPACE_SPLITTER)
-                                    .filter { it.isNotEmpty() }
-                                val withoutPartial = if (word.isNotEmpty()) {
-                                    val trimmed = textBefore.trimEnd()
-                                    if (trimmed.endsWith(word)) allWords.dropLast(1) else allWords
-                                } else allWords
-                                withoutPartial.takeLast(3)
-                            } else emptyList()
-
                             if (gen != queryGeneration.get()) return@submit LmResult.EMPTY
 
                             val result = bridge.getAllPredictions(
@@ -665,7 +672,6 @@ class PredictionEngine(private val context: Context) :
                                 bannedWords = blacklistArr,
                                 composeX = coords?.first,
                                 composeY = coords?.second,
-                                previousWords = prevWordsList,
                             )
 
                             if (gen != queryGeneration.get()) return@submit LmResult.EMPTY
@@ -749,7 +755,7 @@ class PredictionEngine(private val context: Context) :
                     // ── 5. Adaptive debounce adjustment ─────────────
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
                     avgPredictionTimeMs = (avgPredictionTimeMs * 3 + elapsedMs) / 4
-                    queryDelayMs = (avgPredictionTimeMs / 8).coerceIn(16, 60)
+                    queryDelayMs = (avgPredictionTimeMs / 4).coerceIn(80, 200)
 
                     // ── 6. Post final result to main thread ─────────
                     mainHandler.post {
@@ -1014,17 +1020,13 @@ class PredictionEngine(private val context: Context) :
         val topSuggestion = sorted.firstOrNull()
 
         val bothAgree = topSuggestion?.agreedByBoth == true
-        // LatinIME uses a much higher bar — 0.5 fires on almost every word.
-        val strongConfidence = lmConfidence > 0.85f
+        val strongConfidence = lmConfidence > 0.4f
         val topFromLlm = topSuggestion?.source == Source.LLM
         val binDict = binaryDictionary
         val topInBinaryDict = topSuggestion != null &&
             (binDict?.isValidWord(topSuggestion.word) == true)
-        // If the binary dictionary hasn't loaded yet we can't verify the typed word,
-        // so treat it as valid (conservative — skip autocorrect rather than fire blind).
         val typedWordIsValid = binDict == null || binDict.isValidWord(typedWord)
-        // For short words (≤5 chars) require both LLM and dict to agree — llmSaysAutocorrect
-        // alone has too many false positives on common words like "hi", "they", "that".
+        val lmSaysAutocorrect = lmMode == "autocorrect"
         val shortWord = typedWord.length <= 5
         val shouldAC = acEnabled &&
             topSuggestion != null &&
@@ -1033,7 +1035,7 @@ class PredictionEngine(private val context: Context) :
             !isMostlyCaps(typedWord) &&
             !typedWordIsValid &&
             (topFromLlm || topInBinaryDict) &&
-            (bothAgree || (!shortWord && strongConfidence))
+            (lmSaysAutocorrect || bothAgree || (!shortWord && strongConfidence))
 
         val capTransform: (String) -> String = when (shiftState) {
             ShiftState.CAPS_LOCK -> { w -> w.uppercase() }
@@ -1231,8 +1233,6 @@ class PredictionEngine(private val context: Context) :
     // ── Recorrection ──────────────────────────────────────────────────
 
     fun onCursorMovedTo(ic: InputConnection, selStart: Int, selEnd: Int) {
-        // Any external cursor movement guarantees the composing span is broken.
-        // We MUST terminate our internal composing state immediately.
         if (isComposing) {
             isComposing = false
             wordComposer.reset()
@@ -1270,7 +1270,10 @@ class PredictionEngine(private val context: Context) :
         recorrectionEnd = wordEnd
         lastQueriedWord = ""
 
-        queryRecorrection(ic, fullWord)
+        pendingRecorrection?.let { mainHandler.removeCallbacks(it) }
+        val runnable = Runnable { queryRecorrection(ic, fullWord) }
+        pendingRecorrection = runnable
+        mainHandler.postDelayed(runnable, recorrectionDebounceMs)
     }
 
     private fun queryRecorrection(ic: InputConnection, word: String) {
@@ -1314,23 +1317,12 @@ class PredictionEngine(private val context: Context) :
                     val lmFuture = lmExecutor.submit<LmResult> {
                         if (gen != queryGeneration.get()) return@submit LmResult.EMPTY
 
-                        val prevWordsList = if (textBefore.isNotBlank()) {
-                            val allWords = textBefore.trim().split(WHITESPACE_SPLITTER)
-                                .filter { it.isNotEmpty() }
-                            val withoutPartial = if (word.isNotEmpty()) {
-                                val trimmed = textBefore.trimEnd()
-                                if (trimmed.endsWith(word)) allWords.dropLast(1) else allWords
-                            } else allWords
-                            withoutPartial.takeLast(3)
-                        } else emptyList()
-
                         if (gen != queryGeneration.get()) return@submit LmResult.EMPTY
 
                         val result = bridge.getAllPredictions(
                             textBeforeCursor = textBefore,
                             autocorrectThreshold = acThreshold,
                             bannedWords = blacklistArr,
-                            previousWords = prevWordsList,
                         )
 
                         if (gen != queryGeneration.get()) return@submit LmResult.EMPTY
@@ -1423,6 +1415,8 @@ class PredictionEngine(private val context: Context) :
     }
 
     fun exitRecorrection() {
+        pendingRecorrection?.let { mainHandler.removeCallbacks(it) }
+        pendingRecorrection = null
         recorrectionWord = null
         recorrectionStart = -1
         recorrectionEnd = -1

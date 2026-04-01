@@ -92,7 +92,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalDensity
 import com.dessalines.thumbkey.prediction.SuggestionBar
 import com.dessalines.thumbkey.utils.CircularDragAction
@@ -114,6 +113,7 @@ import kotlin.time.TimeMark
 fun KeyboardScreen(
     settings: AppSettings?,
     clipboardRepository: ClipboardRepository,
+    floatingMode: Boolean = false,
     onSwitchLanguage: () -> Unit,
     onChangePosition: ((old: KeyboardPosition) -> KeyboardPosition) -> Unit,
     onToggleHideLetters: () -> Unit,
@@ -257,12 +257,23 @@ fun KeyboardScreen(
     val zeroHeightInsets = (settings?.zeroHeightInsets ?: DEFAULT_ZERO_HEIGHT_INSETS).toBool()
     val floatingCharEnabled = (settings?.floatingCharEnabled ?: DEFAULT_FLOATING_CHAR_ENABLED).toBool()
 
-    ctx.touchThroughEnabled = touchThroughEnabled
-    ctx.zeroHeightInsets = zeroHeightInsets
-    ctx.floatingCharEnabled = floatingCharEnabled
-    if (!touchThroughEnabled && !zeroHeightInsets) {
+    if (floatingMode) {
+        // Floating panel handles its own touches via WindowManager; don't let
+        // coordinates from this window leak into the IME window's insets/rects.
+        ctx.touchThroughEnabled = false
+        ctx.zeroHeightInsets = false
+        ctx.floatingCharEnabled = floatingCharEnabled
         ctx.suggestionBarRect.setEmpty()
         ctx.keyboardKeysRect.setEmpty()
+        ctx.updateTouchableRegion()
+    } else {
+        ctx.touchThroughEnabled = touchThroughEnabled
+        ctx.zeroHeightInsets = zeroHeightInsets
+        ctx.floatingCharEnabled = floatingCharEnabled
+        if (!touchThroughEnabled && !zeroHeightInsets) {
+            ctx.suggestionBarRect.setEmpty()
+            ctx.keyboardKeysRect.setEmpty()
+        }
     }
 
     val keyBorderWidthFloat = keyBorderWidth / 10.0f
@@ -649,26 +660,33 @@ fun KeyboardScreen(
 
         val drawKeyboard = @Composable { alignment: Alignment, drawBackdrop: Boolean, positionPadding: Int ->
             val modifierPositionPadding =
-                if (positionPadding > 0) {
+                if (floatingMode) {
+                    Modifier
+                } else if (positionPadding > 0) {
                     Modifier.padding(start = positionPadding.dp)
                 } else {
                     Modifier.padding(end = -positionPadding.dp)
                 }
             Box(
-                contentAlignment = alignment,
+                contentAlignment = if (floatingMode) Alignment.TopStart else alignment,
                 modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .then(if (drawBackdrop) Modifier.background(effectiveBackdropColor) else (Modifier))
-                        .then(if (!ignoreBottomPadding) Modifier.safeDrawingPadding() else Modifier)
-                        .padding(bottom = pushupSizeDp)
-                        .then(
-                            if (backdropEnabled) {
-                                Modifier.padding(top = backdropPadding)
-                            } else {
-                                (Modifier)
-                            },
-                        ),
+                    if (floatingMode) {
+                        Modifier
+                            .then(if (drawBackdrop) Modifier.background(effectiveBackdropColor) else Modifier)
+                    } else {
+                        Modifier
+                            .fillMaxWidth()
+                            .then(if (drawBackdrop) Modifier.background(effectiveBackdropColor) else (Modifier))
+                            .then(if (!ignoreBottomPadding) Modifier.safeDrawingPadding() else Modifier)
+                            .padding(bottom = pushupSizeDp)
+                            .then(
+                                if (backdropEnabled) {
+                                    Modifier.padding(top = backdropPadding)
+                                } else {
+                                    (Modifier)
+                                },
+                            )
+                    },
             ) {
                 if (drawBackdrop) {
                     val dividerColor = if (helperFullOpacity) {
@@ -808,7 +826,8 @@ fun KeyboardScreen(
 
         // Column stacks the suggestion bar above the keyboard.
         // The inner Box lets Dual-mode keyboards overlap as siblings.
-        Column(modifier = Modifier.fillMaxWidth().then(
+        val kbView = LocalView.current
+        Column(modifier = (if (floatingMode) Modifier else Modifier.fillMaxWidth()).then(
             if (!helperFullOpacity) Modifier.alpha(opacityAlpha) else Modifier
         )) {
             Box(
@@ -827,9 +846,20 @@ fun KeyboardScreen(
                                 ctx.updateTouchableRegion()
                             }
                             if (floatingCharEnabled) {
-                                val screenPos = coordinates.positionOnScreen()
-                                ctx.suggestionBarScreenCenterX = screenPos.x + size.width / 2f
-                                ctx.suggestionBarScreenCenterY = screenPos.y + size.height / 2f
+                                val inRoot = coordinates.localToRoot(Offset.Zero)
+                                val screenX: Float
+                                val screenY: Float
+                                if (ctx.isFloatingPanelActive) {
+                                    screenX = ctx.floatingPanelScreenX + inRoot.x
+                                    screenY = ctx.floatingPanelScreenY + inRoot.y
+                                } else {
+                                    val loc = IntArray(2)
+                                    kbView.getLocationOnScreen(loc)
+                                    screenX = loc[0] + inRoot.x
+                                    screenY = loc[1] + inRoot.y
+                                }
+                                ctx.suggestionBarScreenCenterX = screenX + size.width / 2f
+                                ctx.suggestionBarScreenCenterY = screenY + size.height / 2f
                             }
                         }
                     } else {
@@ -886,7 +916,7 @@ fun KeyboardScreen(
                 )
             }
 
-            Box(modifier = Modifier.fillMaxWidth()) {
+            Box(modifier = if (floatingMode) Modifier else Modifier.fillMaxWidth()) {
                 drawKeyboard(keyboardPositionToAlignment(position), backdropEnabled, positionPadding)
                 if (position == KeyboardPosition.Dual) {
                     drawKeyboard(keyboardPositionToAlignment(KeyboardPosition.Right), false, positionPadding)

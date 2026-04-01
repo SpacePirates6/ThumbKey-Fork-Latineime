@@ -36,85 +36,94 @@ class ComposeKeyboardView(
 
     @Composable
     override fun Content() {
-        val settingsState = settingsRepo.appSettings.observeAsState()
-        val settings by settingsState
         val ctx = context as IMEService
+        KeyboardContent(ctx, settingsRepo, clipboardRepo, floatingMode = false)
+    }
+}
 
-        ThumbkeyTheme(
-            settings = settings,
-        ) {
-            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-                KeyboardScreen(
-                    settings = settings,
-                    clipboardRepository = clipboardRepo,
-                    onSwitchLanguage = {
-                        ctx.lifecycleScope.launch {
-                            // Cycle to the next keyboard
-                            val state = settingsState.value
-                            state?.let { s ->
+@Composable
+fun KeyboardContent(
+    ctx: IMEService,
+    settingsRepo: AppSettingsRepository,
+    clipboardRepo: ClipboardRepository,
+    floatingMode: Boolean,
+) {
+    val settingsState = settingsRepo.appSettings.observeAsState()
+    val settings by settingsState
 
-                                val layouts =
-                                    keyboardLayoutsSetFromDbIndexString(s.keyboardLayouts).toList()
-                                if (layouts.isEmpty()) return@launch
-                                val currentLayout = s.keyboardLayout
-                                val index = layouts.map { it.ordinal }.indexOf(currentLayout)
-                                val nextIndex = (index + 1).mod(layouts.size)
-                                val nextLayout = layouts.getOrNull(nextIndex)
-                                nextLayout?.let { layout ->
-                                    val s2 = s.copy(keyboardLayout = layout.ordinal)
-                                    settingsRepo.update(s2)
+    ThumbkeyTheme(
+        settings = settings,
+    ) {
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+            KeyboardScreen(
+                settings = settings,
+                clipboardRepository = clipboardRepo,
+                floatingMode = floatingMode,
+                onSwitchLanguage = {
+                    ctx.lifecycleScope.launch {
+                        val state = settingsState.value
+                        state?.let { s ->
 
-                                    ctx.currentKeyboardDefinition
-                                        ?.settings
-                                        ?.textProcessor
-                                        ?.handleFinishInput(ctx)
-                                    ctx.currentKeyboardDefinition = (layouts[nextIndex].keyboardDefinition)
-                                    ctx.currentKeyboardDefinition
-                                        ?.settings
-                                        ?.textProcessor
-                                        ?.updateCursorPosition(ctx)
+                            val layouts =
+                                keyboardLayoutsSetFromDbIndexString(s.keyboardLayouts).toList()
+                            if (layouts.isEmpty()) return@launch
+                            val currentLayout = s.keyboardLayout
+                            val index = layouts.map { it.ordinal }.indexOf(currentLayout)
+                            val nextIndex = (index + 1).mod(layouts.size)
+                            val nextLayout = layouts.getOrNull(nextIndex)
+                            nextLayout?.let { layout ->
+                                val s2 = s.copy(keyboardLayout = layout.ordinal)
+                                settingsRepo.update(s2)
 
-                                    // Display the new layout's name on the screen
-                                    if (s.showToastOnLayoutSwitch.toBool()) {
-                                        val layoutName = layout.keyboardDefinition.title
-                                        Toast
-                                            .makeText(context, layoutName, Toast.LENGTH_SHORT)
-                                            .show()
-                                    }
+                                ctx.currentKeyboardDefinition
+                                    ?.settings
+                                    ?.textProcessor
+                                    ?.handleFinishInput(ctx)
+                                ctx.currentKeyboardDefinition = (layouts[nextIndex].keyboardDefinition)
+                                ctx.currentKeyboardDefinition
+                                    ?.settings
+                                    ?.textProcessor
+                                    ?.updateCursorPosition(ctx)
+
+                                if (s.showToastOnLayoutSwitch.toBool()) {
+                                    val layoutName = layout.keyboardDefinition.title
+                                    Toast
+                                        .makeText(ctx, layoutName, Toast.LENGTH_SHORT)
+                                        .show()
                                 }
                             }
                         }
-                    },
-                    onChangePosition = { f ->
-                        ctx.lifecycleScope.launch {
-                            val state = settingsState.value
-                            state?.let { s ->
-                                val nextPosition = f(KeyboardPosition.entries[s.position]).ordinal
-                                val s2 = s.copy(position = nextPosition)
-                                settingsRepo.update(s2)
-                            }
+                    }
+                },
+                onChangePosition = { f ->
+                    ctx.lifecycleScope.launch {
+                        val state = settingsState.value
+                        state?.let { s ->
+                            val nextPosition = f(KeyboardPosition.entries[s.position]).ordinal
+                            val s2 = s.copy(position = nextPosition)
+                            settingsRepo.update(s2)
                         }
-                    },
-                    onToggleHideLetters = {
-                        ctx.lifecycleScope.launch {
-                            val state = settingsState.value
-                            state?.let { s ->
-                                val newHideLetters = (!s.hideLetters.toBool()).toInt()
-                                val s2 = s.copy(hideLetters = newHideLetters)
-                                settingsRepo.update(s2)
-                            }
+                    }
+                },
+                onToggleHideLetters = {
+                    ctx.lifecycleScope.launch {
+                        val state = settingsState.value
+                        state?.let { s ->
+                            val newHideLetters = (!s.hideLetters.toBool()).toInt()
+                            val s2 = s.copy(hideLetters = newHideLetters)
+                            settingsRepo.update(s2)
                         }
-                    },
-                    onGoToClipboardSettings = {
-                        val intent =
-                            Intent(context, MainActivity::class.java).apply {
-                                putExtra("startRoute", "clipboardSettings")
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                            }
-                        context.startActivity(intent)
-                    },
-                )
-            }
+                    }
+                },
+                onGoToClipboardSettings = {
+                    val intent =
+                        Intent(ctx, MainActivity::class.java).apply {
+                            putExtra("startRoute", "clipboardSettings")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        }
+                    ctx.startActivity(intent)
+                },
+            )
         }
     }
 }

@@ -47,7 +47,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionOnScreen
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -208,16 +207,8 @@ fun KeyboardKey(
 
     var selection by remember { mutableStateOf(Selection()) }
 
-    var keyScreenPosition by remember { mutableStateOf(Offset.Zero) }
+    var keyPosInRoot by remember { mutableStateOf(Offset.Zero) }
     var keySizePx by remember { mutableStateOf(IntSize.Zero) }
-
-    fun emitFloatingCharForAction(action: KeyAction, velX: Float = 0f, velY: Float = 0f) {
-        if (action is KeyAction.CommitText) {
-            val centerX = keyScreenPosition.x + keySizePx.width / 2f
-            val centerY = keyScreenPosition.y + keySizePx.height / 2f
-            ime.emitFloatingChar(action.text, centerX, centerY, velX, velY)
-        }
-    }
 
     val backgroundColor =
         if (!(isDragged.value || isPressed)) {
@@ -229,6 +220,30 @@ fun KeyboardKey(
     val keyBorderColour = MaterialTheme.colorScheme.outline
     val keySize = (keyHeight + keyWidth) / 2.0
     val view = LocalView.current
+
+    fun getKeyScreenPos(): Offset {
+        // For the floating keyboard panel, getLocationOnScreen() is unreliable
+        // because updateViewLayout during a traversal leaves mAttachInfo stale
+        // at (0,0).  Use the IME's authoritative stored position instead.
+        if (ime.isFloatingPanelActive) {
+            return Offset(
+                ime.floatingPanelScreenX + keyPosInRoot.x,
+                ime.floatingPanelScreenY + keyPosInRoot.y,
+            )
+        }
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        return Offset(loc[0] + keyPosInRoot.x, loc[1] + keyPosInRoot.y)
+    }
+
+    fun emitFloatingCharForAction(action: KeyAction, velX: Float = 0f, velY: Float = 0f) {
+        if (action is KeyAction.CommitText) {
+            val ksp = getKeyScreenPos()
+            val centerX = ksp.x + keySizePx.width / 2f
+            val centerY = ksp.y + keySizePx.height / 2f
+            ime.emitFloatingChar(action.text, centerX, centerY, velX, velY)
+        }
+    }
     val audioManager = remember { ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     LaunchedEffect(key1 = isPressed) {
@@ -251,7 +266,7 @@ fun KeyboardKey(
             .width(keyWidth.dp * key.widthMultiplier)
             .padding(keyPadding.dp)
             .onGloballyPositioned { coordinates ->
-                keyScreenPosition = coordinates.positionOnScreen()
+                keyPosInRoot = coordinates.localToRoot(Offset.Zero)
                 keySizePx = coordinates.size
             }
             .clip(RoundedCornerShape(keyRadius.dp))
@@ -507,8 +522,9 @@ fun KeyboardKey(
                             }
                         } else if (key.slideType == SlideType.GESTURE_TYPING && predictionEngine != null) {
                             val decoder = predictionEngine.gestureDecoder
-                            val absX = keyScreenPosition.x + keySizePx.width / 2f + offsetX
-                            val absY = keyScreenPosition.y + keySizePx.height / 2f + offsetY
+                            val ksp = getKeyScreenPos()
+                            val absX = ksp.x + keySizePx.width / 2f + offsetX
+                            val absY = ksp.y + keySizePx.height / 2f + offsetY
                             val kw = decoder.keyWidthPx
                             val kh = decoder.keyHeightPx
 
@@ -573,6 +589,10 @@ fun KeyboardKey(
                                     ) ||
                                     !slideBackspaceDeadzoneEnabled
                                 ) {
+                                    // Commit any composing span before starting selection-based deletion,
+                                    // otherwise setSelection and getSelectedText interact badly with the
+                                    // uncommitted composing text.
+                                    predictionEngine?.finishComposing(ime.currentInputConnection)
                                     // reset offsetX, do not reset offsetY when sliding, it will break selecting
                                     offsetX = 0f
                                     selection = startSelection(ime)
@@ -810,8 +830,9 @@ fun KeyboardKey(
                                         onKeyEvent = onKeyEvent,
                                     )
                                     // PDC shootdown for drag-selected chunk — use cursor position so fragments burst from the text
-                                    val spawnX = if (!ime.cursorScreenX.value.isNaN()) ime.cursorScreenX.value else keyScreenPosition.x + keySizePx.width / 2f
-                                    val spawnY = if (!ime.cursorScreenY.value.isNaN()) ime.cursorScreenY.value else keyScreenPosition.y + keySizePx.height / 2f
+                                    val pdcKsp = getKeyScreenPos()
+                                    val spawnX = if (!ime.cursorScreenX.value.isNaN()) ime.cursorScreenX.value else pdcKsp.x + keySizePx.width / 2f
+                                    val spawnY = if (!ime.cursorScreenY.value.isNaN()) ime.cursorScreenY.value else pdcKsp.y + keySizePx.height / 2f
                                     ime.emitPdcShootdown(it.toString(), spawnX, spawnY)
                                 }
                                 // Play an extra haptic effect on supported devices when slide deleting text

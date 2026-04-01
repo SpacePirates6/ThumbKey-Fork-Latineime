@@ -1,9 +1,5 @@
 package com.dessalines.thumbkey.prediction
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,70 +52,60 @@ fun SuggestionBar(
     ) {
         val displaySuggestions = suggestions.toList().take(3)
 
-        AnimatedContent(
-            targetState = displaySuggestions,
-            transitionSpec = {
-                fadeIn() togetherWith fadeOut()
-            },
-            label = "suggestionBarContent",
-        ) { currentSuggestions ->
-            if (currentSuggestions.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    currentSuggestions.forEachIndexed { index, suggestion ->
-                        if (index > 0) {
-                            VerticalDivider(
-                                modifier = Modifier
-                                    .height(20.dp)
-                                    .padding(horizontal = 2.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant,
-                            )
-                        }
-
-                        val isTypedWord = suggestion.kind == SuggestionKind.TYPED
-                        val isAutocorrectTarget = willAutocorrect && index == 1
-                        val isEmoji = suggestion.kind == SuggestionKind.EMOJI
-
-                        Box(
+        if (displaySuggestions.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                displaySuggestions.forEachIndexed { index, suggestion ->
+                    if (index > 0) {
+                        VerticalDivider(
                             modifier = Modifier
-                                .weight(1f)
-                                .clickable { onSuggestionSelected(index) }
-                                .padding(vertical = 2.dp, horizontal = 4.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = suggestion.word,
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    fontSize = if (isEmoji) 18.sp else 14.sp,
-                                    fontWeight = when {
-                                        isAutocorrectTarget -> FontWeight.Bold
-                                        else -> FontWeight.Normal
-                                    },
-                                    textDecoration = if (isAutocorrectTarget) {
-                                        TextDecoration.Underline
-                                    } else {
-                                        TextDecoration.None
-                                    },
-                                ),
-                                color = when {
-                                    isAutocorrectTarget -> MaterialTheme.colorScheme.primary
-                                    isTypedWord -> MaterialTheme.colorScheme.onSurfaceVariant
-                                    else -> MaterialTheme.colorScheme.onSurface
+                                .height(20.dp)
+                                .padding(horizontal = 2.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                    }
+
+                    val isTypedWord = suggestion.kind == SuggestionKind.TYPED
+                    val isAutocorrectTarget = willAutocorrect && index == 1
+                    val isEmoji = suggestion.kind == SuggestionKind.EMOJI
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onSuggestionSelected(index) }
+                            .padding(vertical = 2.dp, horizontal = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = suggestion.word,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = if (isEmoji) 18.sp else 14.sp,
+                                fontWeight = when {
+                                    isAutocorrectTarget -> FontWeight.Bold
+                                    else -> FontWeight.Normal
                                 },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center,
-                            )
-                        }
+                                textDecoration = if (isAutocorrectTarget) {
+                                    TextDecoration.Underline
+                                } else {
+                                    TextDecoration.None
+                                },
+                            ),
+                            color = when {
+                                isAutocorrectTarget -> MaterialTheme.colorScheme.primary
+                                isTypedWord -> MaterialTheme.colorScheme.onSurfaceVariant
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
                     }
                 }
-            } else {
-                Box(modifier = Modifier.fillMaxWidth())
             }
         }
     }

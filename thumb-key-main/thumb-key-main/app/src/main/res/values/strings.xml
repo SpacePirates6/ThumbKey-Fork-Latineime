@@ -112,6 +112,8 @@
     <string name="key_fadeout_time">Fadeout duration: %1$sms</string>
     <string name="touch_through">Touch-through non-input areas</string>
     <string name="touch_through_summary">Taps on dead space pass through to the app behind the keyboard</string>
+    <string name="tap_to_place">Tap to place keyboard</string>
+    <string name="tap_to_place_summary">Tap anywhere on screen to position the keyboard center at that point</string>
     <string name="helper_full_opacity">Helper at full opacity</string>
     <string name="helper_full_opacity_summary">Show the swipe helper animation at full opacity regardless of the keyboard opacity setting</string>
     <string name="zero_height_insets">Zero-height keyboard</string>

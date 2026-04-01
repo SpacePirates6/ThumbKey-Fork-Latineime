@@ -220,7 +220,6 @@ class PredictionBridge(private val context: Context) {
         composeX: IntArray? = null,
         composeY: IntArray? = null,
         inputMode: Int = 0,
-        previousWords: List<String> = emptyList(),
     ): LMResult {
         if (!isReady()) return LMResult(emptyList(), "clueless")
 
@@ -232,13 +231,10 @@ class PredictionBridge(private val context: Context) {
         } else {
             ""
         }
-        var ctx = if (partialWord.isNotEmpty() && trimmed.endsWith(partialWord)) {
+        val ctx = if (partialWord.isNotEmpty() && trimmed.endsWith(partialWord)) {
             trimmed.dropLast(partialWord.length).trim()
         } else {
             trimmed.trim()
-        }
-        if (previousWords.isNotEmpty()) {
-            ctx = "${previousWords.joinToString(" ")} $ctx"
         }
 
         return try {
