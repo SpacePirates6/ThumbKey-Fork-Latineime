@@ -21,19 +21,23 @@ class ContactsDictionaryProvider(private val context: Context) {
             arrayOf(Contacts.DISPLAY_NAME)
         }
         try {
-            val cursor: Cursor? = contentResolver.query(
+            // Sort locally after capping to avoid having the provider sort the full
+            // contact list (slow on large address books, and some OEM providers throw
+            // on certain sortOrder strings).
+            val cursor: Cursor = contentResolver.query(
                 Contacts.CONTENT_URI,
                 projection,
                 null,
                 null,
-                projection[0]
+                null,
             ) ?: return
 
-            cursor?.use {
+            cursor.use {
                 val nameCol = it.getColumnIndex(projection[0])
                 if (nameCol < 0) return
                 while (it.moveToNext()) {
-                    val name = it.getString(nameCol) ?: continue
+                    val name = try { it.getString(nameCol) } catch (_: Exception) { null }
+                        ?: continue
                     for (word in name.split(Regex("\\s+"))) {
                         if (word.length >= 2) {
                             newWords.add(word)
@@ -46,6 +50,10 @@ class ContactsDictionaryProvider(private val context: Context) {
             synchronized(lock) {
                 wordsList.clear()
             }
+            return
+        } catch (e: Exception) {
+            // Some OEMs throw IllegalArgumentException from the provider itself.
+            Log.w("ContactsDict", "Failed to query contacts", e)
             return
         }
 

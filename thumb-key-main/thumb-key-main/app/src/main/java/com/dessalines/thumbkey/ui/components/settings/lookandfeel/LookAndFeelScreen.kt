@@ -56,6 +56,7 @@ import com.dessalines.thumbkey.db.DEFAULT_ANIMATION_HELPER_SPEED
 import com.dessalines.thumbkey.db.DEFAULT_ANIMATION_SPEED
 import com.dessalines.thumbkey.db.DEFAULT_AUTO_SIZE_KEYS
 import com.dessalines.thumbkey.db.DEFAULT_ENABLE_KEY_FADEOUT
+import com.dessalines.thumbkey.db.DEFAULT_FADEOUT_BORDER
 import com.dessalines.thumbkey.db.DEFAULT_KEY_FADEOUT_TIME_MS
 import com.dessalines.thumbkey.db.DEFAULT_KEYBOARD_OPACITY
 import com.dessalines.thumbkey.db.DEFAULT_TAP_TO_PLACE_ENABLED
@@ -165,6 +166,7 @@ fun LookAndFeelScreen(
     var enableKeyFadeoutState = (settings?.enableKeyFadeout ?: DEFAULT_ENABLE_KEY_FADEOUT).toBool()
     var keyFadeoutTimeState = (settings?.keyFadeoutTimeMs ?: DEFAULT_KEY_FADEOUT_TIME_MS).toFloat()
     var keyFadeoutTimeSliderState by remember { mutableFloatStateOf(keyFadeoutTimeState) }
+    var fadeoutBorderState = (settings?.fadeoutBorder ?: DEFAULT_FADEOUT_BORDER).toBool()
 
     var touchThroughEnabledState = (settings?.touchThroughEnabled ?: DEFAULT_TOUCH_THROUGH_ENABLED).toBool()
 
@@ -241,6 +243,7 @@ fun LookAndFeelScreen(
                 enableKeyFadeout = enableKeyFadeoutState.toInt(),
                 keyFadeoutTimeMs = keyFadeoutTimeState.toInt(),
                 tapToPlaceEnabled = tapToPlaceEnabledState.toInt(),
+                fadeoutBorder = fadeoutBorderState.toInt(),
             ),
         )
     }
@@ -477,6 +480,26 @@ fun LookAndFeelScreen(
                             icon = {
                                 Icon(
                                     imageVector = Icons.Outlined.Animation,
+                                    contentDescription = null,
+                                )
+                            },
+                        )
+
+                        SwitchPreference(
+                            value = fadeoutBorderState,
+                            onValueChange = {
+                                fadeoutBorderState = it
+                                updateLookAndFeel()
+                            },
+                            title = {
+                                Text(stringResource(R.string.fadeout_border))
+                            },
+                            summary = {
+                                Text(stringResource(R.string.fadeout_border_summary))
+                            },
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Outlined.BorderOuter,
                                     contentDescription = null,
                                 )
                             },

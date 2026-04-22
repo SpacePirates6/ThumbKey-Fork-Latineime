@@ -36,6 +36,7 @@ endif()
 add_compile_options(
         -fexceptions
         -DHAVE_PTHREAD
+        -DGGML_USE_CLBLAST
         -Wno-unused-parameter
         -Wno-unused-function
         -Wno-vla-cxx-extension

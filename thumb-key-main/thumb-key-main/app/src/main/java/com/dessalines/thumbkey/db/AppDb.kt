@@ -24,8 +24,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.concurrent.Executors
-
 const val DEFAULT_AUTO_SIZE_KEYS = 1
 const val DEFAULT_NON_SQUARE_KEYS = 0
 const val DEFAULT_KEY_WIDTH = 64
@@ -81,6 +79,10 @@ const val DEFAULT_FLOATING_CHAR_REALISTIC_GRAVITY = 0  // use accelerometer for 
 const val DEFAULT_FLOATING_CHAR_IMPACT_VELOCITY = 0  // infer thumb velocity from last-impact-to-current-impact for non-swipe taps
 const val DEFAULT_ENABLE_KEY_FADEOUT = 0
 const val DEFAULT_KEY_FADEOUT_TIME_MS = 1000
+// Fadeout-border toggle — when enabled (the default), the key outlines stay fully
+// opaque even while the rest of the key fades after release. Only takes effect when
+// key fadeout is enabled.
+const val DEFAULT_FADEOUT_BORDER = 1
 const val DEFAULT_TAP_TO_PLACE_ENABLED = 0
 const val DEFAULT_CLIPBOARD_HISTORY_ENABLED = 0
 const val DEFAULT_CLIPBOARD_AUTO_CLEANUP_ENABLED = 1
@@ -169,11 +171,12 @@ data class AppSettings(
         defaultValue = DEFAULT_THEME_COLOR.toString(),
     )
     val themeColor: Int,
-    // TODO get rid of this column next time you regenerate the app
+    // Legacy column — kept to avoid a destructive Room migration
     @ColumnInfo(
         name = "viewed_changelog",
         defaultValue = "0",
     )
+    @Deprecated("Unused. Retained for DB schema compatibility.")
     val viewedChangelog: Int,
     @ColumnInfo(
         name = "min_swipe_length",
@@ -200,11 +203,12 @@ data class AppSettings(
         defaultValue = "$DEFAULT_KEYBOARD_LAYOUT",
     )
     val keyboardLayouts: String,
-    // TODO this needs to be gotten rid of in the next DB update
+    // Legacy column — superseded by key_border_width. Kept for DB schema compatibility.
     @ColumnInfo(
         name = "key_borders",
         defaultValue = DEFAULT_KEY_BORDERS.toString(),
     )
+    @Deprecated("Superseded by key_border_width. Retained for DB schema compatibility.")
     val keyBorders: Int,
     @ColumnInfo(
         name = "spacebar_multitaps",
@@ -421,6 +425,11 @@ data class AppSettings(
         defaultValue = DEFAULT_TAP_TO_PLACE_ENABLED.toString(),
     )
     val tapToPlaceEnabled: Int = DEFAULT_TAP_TO_PLACE_ENABLED,
+    @ColumnInfo(
+        name = "fadeout_border",
+        defaultValue = DEFAULT_FADEOUT_BORDER.toString(),
+    )
+    val fadeoutBorder: Int = DEFAULT_FADEOUT_BORDER,
 )
 
 data class LayoutsUpdate(
@@ -571,6 +580,8 @@ data class LookAndFeelUpdate(
     val keyFadeoutTimeMs: Int,
     @ColumnInfo(name = "tap_to_place_enabled")
     val tapToPlaceEnabled: Int,
+    @ColumnInfo(name = "fadeout_border")
+    val fadeoutBorder: Int,
 )
 
 data class BehaviorUpdate(
@@ -720,7 +731,7 @@ class AppSettingsRepository(
 }
 
 @Database(
-    version = 33,
+    version = 34,
     entities = [AppSettings::class],
     exportSchema = true,
 )
@@ -775,22 +786,25 @@ abstract class AppDB : RoomDatabase() {
                             MIGRATION_30_31,
                             MIGRATION_31_32,
                             MIGRATION_32_33,
+                            MIGRATION_33_34,
                         )
-                        // Necessary because it can't insert data on creation
+                        // Seed the single AppSettings row on first creation only.
+                        // Previously this lived inside `onOpen` (which also incorrectly
+                        // called `super.onCreate`) and spawned a new SingleThreadExecutor
+                        // on every open — leaking a thread each time the DB reopened.
+                        // `onCreate` runs exactly once and on Room's background creation
+                        // thread, so no manual executor is needed.
                         .addCallback(
                             object : Callback() {
-                                override fun onOpen(db: SupportSQLiteDatabase) {
+                                override fun onCreate(db: SupportSQLiteDatabase) {
                                     super.onCreate(db)
-                                    Executors.newSingleThreadExecutor().execute {
-                                        db.insert(
-                                            "AppSettings",
-                                            // Ensures it won't overwrite the existing data
-                                            CONFLICT_IGNORE,
-                                            ContentValues(2).apply {
-                                                put("id", 1)
-                                            },
-                                        )
-                                    }
+                                    db.insert(
+                                        "AppSettings",
+                                        CONFLICT_IGNORE,
+                                        ContentValues(2).apply {
+                                            put("id", 1)
+                                        },
+                                    )
                                 }
                             },
                         ).build()

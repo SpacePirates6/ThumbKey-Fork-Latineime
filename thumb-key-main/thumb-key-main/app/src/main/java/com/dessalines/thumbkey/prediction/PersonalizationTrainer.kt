@@ -16,7 +16,7 @@ class PersonalizationTrainer(
 ) {
     companion object {
         private const val TAG = "PersonalizationTrainer"
-        private const val MIN_EXAMPLES_TO_TRAIN = 100
+        private const val MIN_EXAMPLES_TO_TRAIN = 50
         private const val STUB_FILE = "personalization_examples.json"
     }
 

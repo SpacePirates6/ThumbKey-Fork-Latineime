@@ -119,12 +119,29 @@ class UserHistoryDictionary(context: Context) {
     fun getCompletions(prefix: String, limit: Int = 10): List<Pair<String, Int>> {
         val p = prefix.lowercase().trim()
         synchronized(lock) {
-            return entries.values
-                .filter { it.word.startsWith(p) }
+            val seq = entries.values.asSequence()
+            val matching = if (p.isEmpty()) seq else seq.filter { it.word.startsWith(p) }
+            return matching
                 .map { it to effectiveFrequencyOf(it) }
                 .sortedByDescending { it.second }
                 .take(limit)
                 .map { it.first.word to it.second.toInt() }
+                .toList()
+        }
+    }
+
+    /**
+     * Top-K entries by effective frequency. Much faster than `getCompletions("", k)`
+     * for next-word prediction paths that don't need prefix filtering.
+     */
+    fun getTopK(k: Int): List<Pair<String, Int>> {
+        synchronized(lock) {
+            return entries.values.asSequence()
+                .map { it to effectiveFrequencyOf(it) }
+                .sortedByDescending { it.second }
+                .take(k)
+                .map { it.first.word to it.second.toInt() }
+                .toList()
         }
     }
 
@@ -206,9 +223,19 @@ class UserHistoryDictionary(context: Context) {
     val size: Int
         get() = synchronized(lock) { entries.size }
 
+    /**
+     * Called from recordWord() while already holding `lock`. Only does a full
+     * frequency-decay scan when we're near the cap, not on every insert.
+     */
     private fun maybeEvictLru() {
-        entries.filter { effectiveFrequencyOf(it.value) < MIN_EFFECTIVE_FREQUENCY }.keys.toList()
-            .forEach { entries.remove(it) }
+        if (entries.size < MAX_ENTRIES) return
+
+        val toRemove = ArrayList<String>()
+        for ((key, entry) in entries) {
+            if (effectiveFrequencyOf(entry) < MIN_EFFECTIVE_FREQUENCY) toRemove.add(key)
+        }
+        for (key in toRemove) entries.remove(key)
+
         if (entries.size >= MAX_ENTRIES) {
             val oldest = entries.values.minByOrNull { it.lastUsed } ?: return
             entries.remove(oldest.word)

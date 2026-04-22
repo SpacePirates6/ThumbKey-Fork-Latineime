@@ -377,3 +377,12 @@ val MIGRATION_32_33 =
             )
         }
     }
+
+val MIGRATION_33_34 =
+    object : Migration(33, 34) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE AppSettings ADD COLUMN fadeout_border INTEGER NOT NULL DEFAULT $DEFAULT_FADEOUT_BORDER",
+            )
+        }
+    }

@@ -6,6 +6,9 @@ import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.inputmethod.InputConnection.CURSOR_UPDATE_MONITOR
 import android.widget.Toast
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.keyframes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,6 +52,7 @@ import com.dessalines.thumbkey.db.DEFAULT_AUTO_SIZE_KEYS
 import com.dessalines.thumbkey.db.DEFAULT_FLOATING_CHAR_ENABLED
 import com.dessalines.thumbkey.db.DEFAULT_HELPER_FULL_OPACITY
 import com.dessalines.thumbkey.db.DEFAULT_ENABLE_KEY_FADEOUT
+import com.dessalines.thumbkey.db.DEFAULT_FADEOUT_BORDER
 import com.dessalines.thumbkey.db.DEFAULT_KEY_FADEOUT_TIME_MS
 import com.dessalines.thumbkey.db.DEFAULT_KEYBOARD_OPACITY
 import com.dessalines.thumbkey.db.DEFAULT_TOUCH_THROUGH_ENABLED
@@ -106,6 +111,7 @@ import com.dessalines.thumbkey.utils.getModifiedKeyboardDefinition
 import com.dessalines.thumbkey.utils.keyboardPositionToAlignment
 import com.dessalines.thumbkey.utils.toBool
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.TimeMark
 
@@ -121,11 +127,14 @@ fun KeyboardScreen(
 ) {
     val ctx = LocalContext.current as IMEService
 
-    val layout =
-        KeyboardLayout.entries.sortedBy { it.ordinal }[
-            settings?.keyboardLayout
-                ?: DEFAULT_KEYBOARD_LAYOUT,
-        ]
+    // Clamp the stored layout index: old installs may reference a layout whose
+    // ordinal no longer exists (layouts can be removed between releases, or the
+    // DB may have been hand-edited via backup/restore). Without the clamp this
+    // throws `ArrayIndexOutOfBoundsException` at keyboard start.
+    val layoutEntries = KeyboardLayout.entries.sortedBy { it.ordinal }
+    val layoutIndex = (settings?.keyboardLayout ?: DEFAULT_KEYBOARD_LAYOUT)
+        .coerceIn(0, layoutEntries.size - 1)
+    val layout = layoutEntries[layoutIndex]
 
     val keyMods = settings?.keyModifications
     val keyboardDefinition = remember(layout, keyMods) {
@@ -254,6 +263,7 @@ fun KeyboardScreen(
     val helperFullOpacity = (settings?.helperFullOpacity ?: DEFAULT_HELPER_FULL_OPACITY).toBool()
     val enableKeyFadeout = (settings?.enableKeyFadeout ?: DEFAULT_ENABLE_KEY_FADEOUT).toBool()
     val keyFadeoutTimeMs = settings?.keyFadeoutTimeMs ?: DEFAULT_KEY_FADEOUT_TIME_MS
+    val fadeoutBorder = (settings?.fadeoutBorder ?: DEFAULT_FADEOUT_BORDER).toBool()
     val zeroHeightInsets = (settings?.zeroHeightInsets ?: DEFAULT_ZERO_HEIGHT_INSETS).toBool()
     val floatingCharEnabled = (settings?.floatingCharEnabled ?: DEFAULT_FLOATING_CHAR_ENABLED).toBool()
 
@@ -509,6 +519,7 @@ fun KeyboardScreen(
                                 opacityAlpha = opacityAlpha,
                                 enableKeyFadeout = enableKeyFadeout,
                                 keyFadeoutTimeMs = keyFadeoutTimeMs,
+                                fadeoutBorder = fadeoutBorder,
                             )
                         }
                     }
@@ -659,6 +670,127 @@ fun KeyboardScreen(
         }
 
         val drawKeyboard = @Composable { alignment: Alignment, drawBackdrop: Boolean, positionPadding: Int ->
+            // ── keyboard open/close animation ──────────────────────────────────────────
+            val entryAnimTrigger by ctx.keyboardEntryAnimTrigger
+            val entryOriginX by ctx.keyboardEntryAnimOriginX
+            val entryOriginY by ctx.keyboardEntryAnimOriginY
+            // backProgress is updated by IMEService coroutines (predictive-back gesture
+            // or requestHideSelf fall loop) so no extra Compose smoothing is needed.
+            val backProgress by ctx.keyboardBackProgress
+            val backEdge by ctx.keyboardBackEdge
+
+            val keyRows = keyboard.arr.size
+            val keyCols = keyboard.arr.firstOrNull()?.size ?: 0
+            val totalKeys = keyRows * keyCols
+
+            // Bug 10/11 fix: `entryOriginX` arrives as a fraction of the full
+            // display width (see IMEService.onWindowShown), but the wave math
+            // below interprets it as a fraction of the keyboard grid.  Those
+            // agree only when the keyboard is exactly screen-wide and anchored
+            // at x=0 — not true for Left/Right/Dual positions or for the
+            // tap-to-place floating panel.  Track this keyboard instance's
+            // screen-space X bounds and remap screen-fraction → grid-fraction
+            // before the animation reads it.  We capture these from the same
+            // Column whose onGloballyPositioned already runs for touchThrough.
+            val rootView = LocalView.current
+            var kbGridScreenLeft by remember { mutableStateOf(Float.NaN) }
+            var kbGridScreenWidth by remember { mutableStateOf(0f) }
+
+            // Both animatables store raw dp offsets (no normalisation).
+            //
+            // Bug 6 fix: keyed on `totalKeys` instead of `keyboard`.  Shift /
+            // caps / numeric toggles all produce a NEW `keyboard` reference,
+            // which used to reset the Animatable list mid-animation — any
+            // in-flight entry wave was orphaned on old objects and the new
+            // grid popped straight to 0f.  Keeping the lists alive across
+            // same-grid-size mode switches lets the wave finish naturally.
+            val keyAnimX = remember(totalKeys) { List(totalKeys) { Animatable(0f) } }
+            val keyAnimY = remember(totalKeys) { List(totalKeys) { Animatable(0f) } }
+
+            LaunchedEffect(entryAnimTrigger) {
+                if (entryAnimTrigger > 0 && totalKeys > 0) {
+                    val dur = 460
+                    // Wave speed: ms of extra stagger per grid unit of distance from origin.
+                    val waveSpeed = 32f
+                    // Push distance (dp): how far each key starts from its slot.
+                    val pushDist = 52f
+
+                    // Remap the screen-fraction X origin into a keyboard-local
+                    // fraction.  If we haven't received a layout pass yet
+                    // (kbGridScreenLeft == NaN), fall back to the center so at
+                    // least the wave is symmetrical instead of skewed.
+                    val dm = ctx.resources.displayMetrics
+                    val screenWidthPx = dm.widthPixels.toFloat().coerceAtLeast(1f)
+                    val localOriginX = if (
+                        kbGridScreenLeft.isFinite() && kbGridScreenWidth > 1f
+                    ) {
+                        val screenPx = entryOriginX * screenWidthPx
+                        ((screenPx - kbGridScreenLeft) / kbGridScreenWidth)
+                            .coerceIn(0f, 1f)
+                    } else {
+                        0.5f
+                    }
+
+                    // Origin in grid-unit coords. entryOriginY stays normalised 0..1
+                    // where Y = 1.2 puts the origin just below the bottom row.
+                    val ox = localOriginX * (keyCols - 1).coerceAtLeast(1).toFloat()
+                    val oy = entryOriginY * (keyRows - 1).coerceAtLeast(1).toFloat()
+
+                    // Snap all keys to their push-start synchronously BEFORE
+                    // any delayed coroutines fire.  Without this, a slow frame
+                    // between increment-trigger and the first animateTo would
+                    // leave keys at their previous state (often 0f) for one
+                    // draw — looks like a flash-then-animate.
+                    for (i in 0 until keyRows) {
+                        for (j in 0 until keyCols) {
+                            val idx = i * keyCols + j
+                            val dx = j.toFloat() - ox
+                            val dy = i.toFloat() - oy
+                            val dist = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.5f)
+                            val normDx = dx / dist
+                            val normDy = dy / dist
+                            keyAnimX[idx].snapTo(-normDx * pushDist)
+                            keyAnimY[idx].snapTo(-normDy * pushDist)
+                        }
+                    }
+
+                    for (i in 0 until keyRows) {
+                        for (j in 0 until keyCols) {
+                            val idx = i * keyCols + j
+
+                            // Vector FROM origin TO this key's grid slot.
+                            val dx = j.toFloat() - ox
+                            val dy = i.toFloat() - oy
+                            val dist = kotlin.math.sqrt(dx * dx + dy * dy).coerceAtLeast(0.5f)
+
+                            // Keys nearest the origin animate first.
+                            val staggerMs = (dist * waveSpeed).toLong()
+
+                            // Each key starts pushed toward the origin (opposite of travel
+                            // direction), then springs outward into its slot.
+                            val normDx = dx / dist
+                            val normDy = dy / dist
+
+                            launch {
+                                delay(staggerMs)
+                                keyAnimX[idx].animateTo(0f, keyframes {
+                                    durationMillis = dur
+                                    (normDx * 5f) at (dur * 78 / 100) using FastOutLinearInEasing
+                                })
+                            }
+                            launch {
+                                delay(staggerMs)
+                                keyAnimY[idx].animateTo(0f, keyframes {
+                                    durationMillis = dur
+                                    (normDy * 5f) at (dur * 78 / 100) using FastOutLinearInEasing
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            // ───────────────────────────────────────────────────────────────────────────
+
             val modifierPositionPadding =
                 if (floatingMode) {
                     Modifier
@@ -704,28 +836,93 @@ fun KeyboardScreen(
                     )
                 }
                 Column(
-                    modifier = modifierPositionPadding.then(
-                        if (touchThroughEnabled) {
-                            Modifier.onGloballyPositioned { coordinates ->
-                                val pos = coordinates.localToWindow(Offset.Zero)
-                                val size = coordinates.size
+                    modifier = modifierPositionPadding
+                        // Capture the Column's screen-space X range so the
+                        // entry wave's origin (reported in screen fractions)
+                        // can be remapped to a keyboard-grid fraction.  Runs
+                        // unconditionally so non-touchthrough keyboards still
+                        // produce a correct wave origin.
+                        .onGloballyPositioned { coordinates ->
+                            val winPos = coordinates.localToWindow(Offset.Zero)
+                            val size = coordinates.size
+                            val screenX = if (ctx.isFloatingPanelActive) {
+                                ctx.floatingPanelScreenX + winPos.x
+                            } else {
+                                val loc = IntArray(2)
+                                rootView.getLocationOnScreen(loc)
+                                loc[0] + winPos.x
+                            }
+                            kbGridScreenLeft = screenX
+                            kbGridScreenWidth = size.width.toFloat()
+                            if (touchThroughEnabled) {
                                 ctx.keyboardKeysRect.set(
-                                    pos.x.toInt(),
-                                    pos.y.toInt(),
-                                    (pos.x + size.width).toInt(),
-                                    (pos.y + size.height).toInt(),
+                                    winPos.x.toInt(),
+                                    winPos.y.toInt(),
+                                    (winPos.x + size.width).toInt(),
+                                    (winPos.y + size.height).toInt(),
                                 )
                                 ctx.updateTouchableRegion()
                             }
-                        } else {
-                            Modifier
                         },
-                    ),
                 ) {
                     keyboard.arr.forEachIndexed { i, row ->
                         Row {
                             row.forEachIndexed { j, key ->
-                                Column {
+                                val keyIdx = i * keyCols + j
+
+                                // ── entry offset (raw dp from animatables) ──
+                                val entryOffsetY =
+                                    if (keyIdx < totalKeys) keyAnimY[keyIdx].value else 0f
+                                val entryOffsetX =
+                                    if (keyIdx < totalKeys) keyAnimX[keyIdx].value else 0f
+
+                                // ── exit offset (per-key stagger) ──
+                                // Bottom rows fall first; top rows trail. Each row gets
+                                // a 0.12 progress "head-start" over the row above it.
+                                val exitDelay = i.toFloat() / keyRows.coerceAtLeast(1) * 0.35f
+                                val perKeyExit = ((backProgress - exitDelay) / (1f - exitDelay)).coerceIn(0f, 1f)
+                                // Quadratic easing → gravity-like acceleration.
+                                val exitEased = perKeyExit * perKeyExit
+                                val exitOffsetY = exitEased * (keyHeight * keyRows + 200f)
+                                // Edge keys splay outward; center keys fall straight.
+                                val centerJ = (keyCols - 1) / 2f
+                                val lateralBias = if (centerJ > 0f) (j - centerJ) / centerJ else 0f
+                                val exitOffsetX = exitEased * lateralBias * 80f
+                                val exitAlpha = (1f - perKeyExit * 1.6f).coerceIn(0f, 1f)
+
+                                // Bug 8 fix: keys offset off-screen during a
+                                // back-progress gesture retain their original
+                                // laid-out pointer rect (Modifier.offset is
+                                // visual-only), so the user can still tap
+                                // invisible keys — or during the 80 ms pause
+                                // after `onBackInvoked`, *all* keys are
+                                // invisible but every tap still types.  Drop
+                                // taps while the exit is visibly underway.
+                                val exitInputBlocked = backProgress > 0.05f
+                                Column(
+                                    modifier = Modifier
+                                        .offset(
+                                            x = (entryOffsetX + exitOffsetX).dp,
+                                            y = (entryOffsetY + exitOffsetY).dp,
+                                        )
+                                        .alpha(exitAlpha)
+                                        .then(
+                                            if (exitInputBlocked) {
+                                                Modifier.pointerInput(Unit) {
+                                                    awaitPointerEventScope {
+                                                        while (true) {
+                                                            val event = awaitPointerEvent(
+                                                                PointerEventPass.Initial,
+                                                            )
+                                                            event.changes.forEach { it.consume() }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                Modifier
+                                            },
+                                        ),
+                                ) {
                                     val ghostKey =
                                         if (ghostKeysEnabled) {
                                             when (mode) {
@@ -814,6 +1011,7 @@ fun KeyboardScreen(
                                         opacityAlpha = opacityAlpha,
                                         enableKeyFadeout = enableKeyFadeout,
                                         keyFadeoutTimeMs = keyFadeoutTimeMs,
+                                        fadeoutBorder = fadeoutBorder,
                                         predictionEngine = predictionEngine,
                                     )
                                 }

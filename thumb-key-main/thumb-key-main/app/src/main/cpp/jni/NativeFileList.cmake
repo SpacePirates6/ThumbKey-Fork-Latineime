@@ -33,6 +33,7 @@ set(LATIN_IME_CORE_SRC_FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/ggml-alloc.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/ggml-quants.c
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/ggml-backend.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/ggml-opencl.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/llama.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/whisper.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ggml/finetune.cpp

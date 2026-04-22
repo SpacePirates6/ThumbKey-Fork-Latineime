@@ -14,19 +14,29 @@ import android.view.WindowManager
 import android.view.inputmethod.CursorAnchorInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Text
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.livedata.observeAsState
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -60,6 +70,7 @@ import com.dessalines.thumbkey.prediction.PredictionBridge
 import com.dessalines.thumbkey.prediction.PredictionEngine
 import com.dessalines.thumbkey.prediction.SuggestionBlacklist
 import com.dessalines.thumbkey.prediction.TrainingLog
+import com.dessalines.thumbkey.prediction.TrainingWorker
 import com.dessalines.thumbkey.prediction.UserDictionaryObserver
 import com.dessalines.thumbkey.prediction.UserHistoryDictionary
 import androidx.compose.ui.text.TextStyle
@@ -75,6 +86,7 @@ import com.dessalines.thumbkey.utils.TAG
 import com.dessalines.thumbkey.utils.ThumbKeyClipboardManager
 import com.dessalines.thumbkey.utils.toBool
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -125,6 +137,35 @@ class IMEService :
             wm.defaultDisplay.getRealSize(point)
             point.x to point.y
         }
+    }
+
+    /**
+     * Returns the device's display rounded-corner radius in pixels.
+     * Queries the largest of the four corners (phones are usually symmetric)
+     * on API 31+. Falls back to a sensible default on older devices.
+     */
+    private fun getDisplayCornerRadiusPx(): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val insets = wm.currentWindowMetrics.windowInsets
+                val positions = intArrayOf(
+                    android.view.RoundedCorner.POSITION_TOP_LEFT,
+                    android.view.RoundedCorner.POSITION_TOP_RIGHT,
+                    android.view.RoundedCorner.POSITION_BOTTOM_LEFT,
+                    android.view.RoundedCorner.POSITION_BOTTOM_RIGHT,
+                )
+                var maxRadius = 0
+                for (p in positions) {
+                    val r = insets.getRoundedCorner(p)?.radius ?: 0
+                    if (r > maxRadius) maxRadius = r
+                }
+                if (maxRadius > 0) return maxRadius
+            } catch (_: Exception) { /* fall through to default */ }
+        }
+        // Fallback: ~32 dp, typical for modern Android phones that don't expose the API
+        val density = resources.displayMetrics.density
+        return (32f * density).toInt()
     }
 
     private fun setupAnimationOverlay() {
@@ -210,15 +251,46 @@ class IMEService :
         removePlacementOverlay()
 
         val token = window?.window?.decorView?.windowToken ?: return
+
+        // Resolve the display's corner radius once, on the main thread, in px.
+        // We convert to dp inside the composable so density is handled correctly.
+        val cornerRadiusPx = getDisplayCornerRadiusPx()
+        val density = resources.displayMetrics.density
+        val cornerRadiusDp = cornerRadiusPx / density
+
         val overlay = ComposeView(this).apply {
             setViewTreeLifecycleOwner(this@IMEService)
             setViewTreeViewModelStoreOwner(this@IMEService)
             setViewTreeSavedStateRegistryOwner(this@IMEService)
             setContent {
+                // Pulsing blue border around the full-screen placement overlay.
+                // Signals to the user that they need to tap somewhere to set the
+                // keyboard origin, without needing a text label.
+                val transition = rememberInfiniteTransition(label = "placementPulse")
+                val pulse by transition.animateFloat(
+                    initialValue = 0f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse,
+                    ),
+                    label = "placementPulseFraction",
+                )
+                val borderWidthDp = (4f + pulse * 8f).dp
+                val borderAlpha = 0.45f + pulse * 0.55f
+                val borderColor = Color(0xFF2196F3).copy(alpha = borderAlpha)
+
+                // Match the device's physical display corners so the pulse follows
+                // the curve instead of painting into the black cutout region and
+                // leaving ugly right-angle stubs behind the rounded display.
+                val overlayShape = RoundedCornerShape(cornerRadiusDp.dp)
+
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .clip(overlayShape)
                         .background(Color.Black.copy(alpha = 0.3f))
+                        .border(width = borderWidthDp, color = borderColor, shape = overlayShape)
                         .pointerInput(Unit) {
                             detectTapGestures { offset ->
                                 val screenX = offset.x
@@ -229,14 +301,7 @@ class IMEService :
                                 showFloatingKeyboard(screenX, screenY)
                             }
                         },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "Tap where you want the keyboard",
-                        color = Color.White,
-                        fontSize = 18.sp,
-                    )
-                }
+                )
             }
         }
 
@@ -277,6 +342,18 @@ class IMEService :
 
     private fun showFloatingKeyboard(centerX: Float, centerY: Float) {
         removeFloatingKeyboard()
+
+        // Safeguard: if the inline input view still holds a real keyboard, swap it
+        // for a 1px empty view so we never simultaneously show the inline + floating
+        // keyboards. The currently-cached inline view is detached from its window
+        // at this point, so this is cheap.
+        cachedInputView?.let {
+            cachedInputView = null
+            val emptyView = View(this).apply {
+                layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
+            }
+            try { this.setInputView(emptyView) } catch (_: Exception) { /* IME may not be attached yet */ }
+        }
 
         val token = window?.window?.decorView?.windowToken ?: return
         val app = application as ThumbkeyApplication
@@ -420,6 +497,31 @@ class IMEService :
     // Cursor position in screen coordinates, updated via CursorAnchorInfo
     val cursorScreenX = androidx.compose.runtime.mutableStateOf(Float.NaN)
     val cursorScreenY = androidx.compose.runtime.mutableStateOf(Float.NaN)
+
+    // Keyboard open/close animation state, observed by KeyboardScreen composable.
+    // entryAnimTrigger increments each time the keyboard window becomes visible,
+    // causing each key to animate in as a ripple wave from the tap origin.
+    val keyboardEntryAnimTrigger = mutableIntStateOf(0)
+    // Monotonically incremented on each `onStartInput` so composables that need
+    // to re-read fields off `currentInputEditorInfo` (e.g. per-key password-field
+    // checks that gate reveal animations) can key their state off this.
+    // The ComposeKeyboardView is cached and reused across field changes, so
+    // without this trigger child composables never recompose on field swap.
+    val inputStartGeneration = mutableIntStateOf(0)
+    // Normalized (0..1) horizontal origin of the entry wave; derived from cursor X
+    // so the ripple starts near where the user's thumb tapped the text field.
+    // Y is fixed just below the bottom row so the wave always rises upward.
+    val keyboardEntryAnimOriginX = mutableFloatStateOf(0.5f)
+    val keyboardEntryAnimOriginY = mutableFloatStateOf(1.2f)
+    // backProgress tracks the predictive-back gesture (0 = no gesture, 1 = committed).
+    // backEdge: 0 = left edge swipe, 1 = right edge swipe.
+    val keyboardBackProgress = mutableFloatStateOf(0f)
+    val keyboardBackEdge = mutableIntStateOf(0)
+    // Holds the registered OnBackInvokedCallback (API 33+) as Any? to avoid
+    // a ClassNotFoundException on older devices.
+    private var predictiveBackCallback: Any? = null
+    // Prevents re-entrant requestHideSelf from launching duplicate animation coroutines.
+    private var hideAnimJob: kotlinx.coroutines.Job? = null
 
     fun updateTouchableRegion() {
         window?.window?.decorView?.requestLayout()
@@ -627,6 +729,9 @@ class IMEService :
     ) {
         super.onStartInput(attribute, restarting)
         inputActive = true
+        // Trigger recomposition of anything that reads `currentInputEditorInfo`
+        // (e.g. password-field gating of reveal animations in KeyboardKey).
+        inputStartGeneration.intValue += 1
         try {
             // Belt-and-suspenders reset: onFinishInput should have already cleaned up, but
             // if it was skipped (IME restart, restarting=true, etc.) this ensures the engine
@@ -642,12 +747,14 @@ class IMEService :
                 variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
             val isNoSuggestions = inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0
 
-            predictionEngine.suppressPredictions = isPasswordField || isNoSuggestions
+            // Suppress prediction UI ONLY for password fields. Username, email, and
+            // NO_SUGGESTIONS fields still show suggestions — we just don't learn from
+            // them (so we never populate the user-history dict with something that
+            // looks like an account name or a one-off token).
+            predictionEngine.suppressPredictions = isPasswordField
+            predictionEngine.suppressLearning = isPasswordField || isNoSuggestions
             if (isPasswordField) {
-                predictionEngine.suppressLearning = true
                 predictionEngine.clearSuggestions()
-            } else {
-                predictionEngine.suppressLearning = false
             }
 
             predictionEngine.open()
@@ -676,6 +783,11 @@ class IMEService :
         val tapToPlaceEnabled = (settings?.tapToPlaceEnabled ?: DEFAULT_TAP_TO_PLACE_ENABLED).toBool()
 
         if (tapToPlaceEnabled) {
+            // Safeguard: we must never have the inline keyboard AND the floating panel
+            // visible at the same time. Throw away any cached inline view so a later
+            // toggle doesn't momentarily render both.
+            cachedInputView = null
+
             // Set a minimal empty input view so the IME framework is satisfied
             val emptyView = View(this).apply {
                 layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
@@ -699,6 +811,15 @@ class IMEService :
             }
             // else: wait for onWindowShown to show placement overlay (needs token)
         } else {
+            // Safeguard: if a floating panel was left over from a prior tap-to-place
+            // session (setting toggled mid-session, external intent, etc.), remove it
+            // before installing the inline keyboard view. Otherwise we'd render two
+            // keyboards at once.
+            if (floatingKeyboardPanel != null || placementOverlay != null) {
+                removeFloatingKeyboard()
+                removePlacementOverlay()
+            }
+
             if (layoutChanged || cachedInputView == null) {
                 val view = this.setupView()
                 cachedInputView = view
@@ -775,6 +896,9 @@ class IMEService :
         predictionEngine.reloadSettings(this)
 
         if (PredictionBridge.isSafeToLoad(this)) {
+            val autoTrainEnabled = getSharedPreferences("ai_settings", MODE_PRIVATE)
+                .getBoolean("auto_training_enabled", true)
+            if (autoTrainEnabled) TrainingWorker.schedule(this)
             modelSwitcher = LanguageModelSwitcher(this)
             lifecycleScope.launch {
                 try {
@@ -912,8 +1036,107 @@ class IMEService :
         ignoreCursorMove = true
     }
 
+    /**
+     * Registers a back-gesture callback on the IME window's OnBackInvokedDispatcher.
+     * API 34+: OnBackAnimationCallback gives per-frame progress so keys track the swipe.
+     * API 33:  OnBackInvokedCallback fires once on commit – we animate a quick fall then hide.
+     * API <33: No-op; the framework's KEYCODE_BACK path handles keyboard dismissal.
+     */
+    private fun setupPredictiveBack() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val win = window?.window ?: return
+        teardownPredictiveBack() // remove any stale callback first
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            @Suppress("NewApi")
+            val cb = object : android.window.OnBackAnimationCallback {
+                override fun onBackStarted(backEvent: android.window.BackEvent) {}
+
+                override fun onBackProgressed(backEvent: android.window.BackEvent) {
+                    keyboardBackProgress.floatValue = backEvent.progress
+                    keyboardBackEdge.intValue = backEvent.swipeEdge
+                }
+
+                override fun onBackInvoked() {
+                    // Gesture committed – snap keys to fully-fallen, then let
+                    // requestHideSelf see backProgress ≥ 1 and close immediately.
+                    keyboardBackProgress.floatValue = 1f
+                    lifecycleScope.launch {
+                        delay(80L) // short pause so fully-fallen state is visible
+                        requestHideSelf(0)
+                    }
+                }
+
+                override fun onBackCancelled() {
+                    lifecycleScope.launch {
+                        // Smoothly return keys to their normal positions over ~200 ms.
+                        val start = keyboardBackProgress.floatValue
+                        val steps = 12
+                        for (step in 1..steps) {
+                            keyboardBackProgress.floatValue = start * (1f - step.toFloat() / steps)
+                            delay(16L)
+                        }
+                        keyboardBackProgress.floatValue = 0f
+                        keyboardBackEdge.intValue = 0
+                    }
+                }
+            }
+            @Suppress("NewApi")
+            win.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, cb,
+            )
+            predictiveBackCallback = cb
+        } else {
+            // API 33 only: no per-frame progress, just intercept the back commit.
+            // requestHideSelf's override will run the fall animation automatically.
+            @Suppress("NewApi")
+            val cb = android.window.OnBackInvokedCallback {
+                requestHideSelf(0)
+            }
+            @Suppress("NewApi")
+            win.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, cb,
+            )
+            predictiveBackCallback = cb
+        }
+    }
+
+    private fun teardownPredictiveBack() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val cb = predictiveBackCallback ?: return
+        predictiveBackCallback = null
+        val win = window?.window ?: run {
+            keyboardBackProgress.floatValue = 0f
+            keyboardBackEdge.intValue = 0
+            return
+        }
+        @Suppress("NewApi")
+        win.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(
+            cb as android.window.OnBackInvokedCallback,
+        )
+        keyboardBackProgress.floatValue = 0f
+        keyboardBackEdge.intValue = 0
+    }
+
     override fun onWindowShown() {
         super.onWindowShown()
+        // Ensure clean state from any previous close animation.
+        hideAnimJob = null
+        keyboardBackProgress.floatValue = 0f
+        keyboardBackEdge.intValue = 0
+        // Derive wave origin X from cursor screen position so the ripple starts near
+        // where the user tapped. Fall back to horizontal center if unavailable.
+        val dm = resources.displayMetrics
+        val curX = cursorScreenX.value
+        keyboardEntryAnimOriginX.floatValue =
+            if (!curX.isNaN() && dm.widthPixels > 0) {
+                (curX / dm.widthPixels).coerceIn(0f, 1f)
+            } else {
+                0.5f
+            }
+        keyboardEntryAnimOriginY.floatValue = 1.2f
+        keyboardEntryAnimTrigger.intValue++
+        setupPredictiveBack()
         // onStartInput fires before the IME window is visible, so windowToken can be null
         // and the overlay silently fails to create. Retry here where the token is guaranteed.
         if (animationOverlay == null) {
@@ -930,10 +1153,37 @@ class IMEService :
 
     override fun requestHideSelf(flags: Int) {
         userDismissed = true
-        super.requestHideSelf(flags)
+
+        // Already fully animated → close immediately.
+        if (keyboardBackProgress.floatValue >= 1f) {
+            hideAnimJob = null
+            super.requestHideSelf(flags)
+            return
+        }
+
+        // Animation already running from a previous call → let it finish.
+        if (hideAnimJob?.isActive == true) return
+
+        hideAnimJob = lifecycleScope.launch {
+            try {
+                val start = keyboardBackProgress.floatValue
+                val remaining = 1f - start
+                val steps = (remaining * 20).toInt().coerceAtLeast(8)
+                for (step in 1..steps) {
+                    keyboardBackProgress.floatValue = start + remaining * (step.toFloat() / steps)
+                    delay(12L)
+                }
+                keyboardBackProgress.floatValue = 1f
+                delay(50L)
+            } finally {
+                super@IMEService.requestHideSelf(flags)
+            }
+        }
     }
 
     override fun onWindowHidden() {
+        hideAnimJob = null
+        teardownPredictiveBack()
         try {
             predictionEngine.clearSuggestions()
         } catch (e: Exception) {

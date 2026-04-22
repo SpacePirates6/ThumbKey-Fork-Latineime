@@ -200,8 +200,8 @@ struct LanguageModelState {
         std::vector<int> general_banned_tokens;
     } specialTokens;
 
-    bool Initialize(const std::string &paths){
-        model = std::unique_ptr<LanguageModel>(LlamaAdapter::createLanguageModel(paths));
+    bool Initialize(const std::string &paths, bool useGpu = false){
+        model = std::unique_ptr<LanguageModel>(LlamaAdapter::createLanguageModel(paths, useGpu));
 
         if(!model) {
             AKLOGE("GGMLDict: Could not load model");
@@ -873,10 +873,10 @@ struct SuggestionItemToRescore {
 };
 
 namespace latinime {
-    static jlong xlm_LanguageModel_open(JNIEnv *env, jclass clazz, jstring modelDir) {
+    static jlong xlm_LanguageModel_open(JNIEnv *env, jclass clazz, jstring modelDir, jboolean useGpu) {
         GGML_UNUSED(clazz);
 
-        AKLOGI("open LM");
+        AKLOGI("open LM (useGpu=%d)", (int)useGpu);
         const jsize sourceDirUtf8Length = env->GetStringUTFLength(modelDir);
         if (sourceDirUtf8Length <= 0) {
             AKLOGE("DICT: Can't get sourceDir string");
@@ -888,7 +888,7 @@ namespace latinime {
 
         auto *state = new LanguageModelState();
 
-        if(!state->Initialize(sourceDirChars)) {
+        if(!state->Initialize(sourceDirChars, (bool)useGpu)) {
             delete state;
             return 0;
         }
@@ -1273,7 +1273,7 @@ namespace latinime {
     static const JNINativeMethod sMethods[] = {
             {
                     const_cast<char *>("openNative"),
-                    const_cast<char *>("(Ljava/lang/String;)J"),
+                    const_cast<char *>("(Ljava/lang/String;Z)J"),
                     reinterpret_cast<void *>(xlm_LanguageModel_open)
             },
             {

@@ -50,7 +50,7 @@ std::string LlamaAdapter::decode(const token_sequence &tokens) const {
     return spm.DecodeIds(tokens);
 }
 
-LanguageModel *LlamaAdapter::createLanguageModel(const std::string &modelPath) {
+LanguageModel *LlamaAdapter::createLanguageModel(const std::string &modelPath, bool useGpu) {
     auto adapter = new LlamaAdapter();
     adapter->metadata = loadModelMetadata(modelPath);
 
@@ -62,6 +62,9 @@ LanguageModel *LlamaAdapter::createLanguageModel(const std::string &modelPath) {
     adapter->n_batch = ctx_params.n_batch;
 
     llama_model_params model_params = llama_model_default_params();
+    if (useGpu) {
+        model_params.n_gpu_layers = 999;
+    }
 
     adapter->model = llama_load_model_from_file(modelPath.c_str(), model_params);
 

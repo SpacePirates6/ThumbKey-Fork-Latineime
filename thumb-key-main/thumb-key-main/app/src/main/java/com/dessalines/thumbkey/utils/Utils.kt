@@ -488,6 +488,14 @@ fun performKeyAction(
         is KeyAction.DeleteWordBeforeCursor -> {
             Log.d(TAG, "deleting last word")
             keyboardSettings.textProcessor?.handleFinishInput(ime)
+            // Commit any live composing span first — deleteSurroundingText cannot
+            // touch composing text by contract, so swipe-backspace would otherwise
+            // show particles but leave the composing word intact on screen.
+            try {
+                ime.predictionEngine.finishComposing(ime.currentInputConnection)
+            } catch (e: Exception) {
+                Log.w(TAG, "Prediction finishComposing failed", e)
+            }
             val deletedText = getTextToDeleteBeforeCursor(ime)
             deleteWordBeforeCursor(ime)
             if (ime.floatingCharEnabled && deletedText.isNotEmpty()) {
@@ -505,18 +513,33 @@ fun performKeyAction(
         is KeyAction.DeleteWordAfterCursor -> {
             Log.d(TAG, "deleting next word")
             keyboardSettings.textProcessor?.handleFinishInput(ime)
+            try {
+                ime.predictionEngine.finishComposing(ime.currentInputConnection)
+            } catch (e: Exception) {
+                Log.w(TAG, "Prediction finishComposing failed", e)
+            }
             deleteWordAfterCursor(ime)
         }
 
         is KeyAction.PreviousWordBeforeCursor -> {
             Log.d(TAG, "Previous word")
             keyboardSettings.textProcessor?.handleFinishInput(ime)
+            try {
+                ime.predictionEngine.finishComposing(ime.currentInputConnection)
+            } catch (e: Exception) {
+                Log.w(TAG, "Prediction finishComposing failed", e)
+            }
             previousWordBeforeCursor(ime)
         }
 
         is KeyAction.NextWordAfterCursor -> {
             Log.d(TAG, "Next word")
             keyboardSettings.textProcessor?.handleFinishInput(ime)
+            try {
+                ime.predictionEngine.finishComposing(ime.currentInputConnection)
+            } catch (e: Exception) {
+                Log.w(TAG, "Prediction finishComposing failed", e)
+            }
             nextWordAfterCursor(ime)
         }
 
@@ -1348,36 +1371,40 @@ fun performKeyAction(
             // Check here for the action #s:
             // https://developer.android.com/reference/android/R.id
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            ime.currentInputConnection.performContextMenuAction(android.R.id.selectAll)
+            ime.currentInputConnection?.performContextMenuAction(android.R.id.selectAll)
         }
 
         KeyAction.Cut -> {
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            if (ime.currentInputConnection.getSelectedText(0).isNullOrEmpty()) {
+            val icCut = ime.currentInputConnection ?: return
+            if (icCut.getSelectedText(0).isNullOrEmpty()) {
                 // Nothing selected, so cut all the text
-                ime.currentInputConnection.performContextMenuAction(android.R.id.selectAll)
-                // Wait a bit for the select all to complete.
+                icCut.performContextMenuAction(android.R.id.selectAll)
+                // Wait a bit for the select all to complete. Re-read the
+                // connection when the runnable fires — the user may have
+                // focused a different field in the meantime.
                 val delayInMillis = 100L
                 Handler(Looper.getMainLooper()).postDelayed({
-                    ime.currentInputConnection.performContextMenuAction(android.R.id.cut)
+                    ime.currentInputConnection?.performContextMenuAction(android.R.id.cut)
                 }, delayInMillis)
             } else {
-                ime.currentInputConnection.performContextMenuAction(android.R.id.cut)
+                icCut.performContextMenuAction(android.R.id.cut)
             }
         }
 
         KeyAction.Copy -> {
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            if (ime.currentInputConnection.getSelectedText(0).isNullOrEmpty()) {
+            val icCopy = ime.currentInputConnection ?: return
+            if (icCopy.getSelectedText(0).isNullOrEmpty()) {
                 // Nothing selected, so copy all the text
-                ime.currentInputConnection.performContextMenuAction(android.R.id.selectAll)
+                icCopy.performContextMenuAction(android.R.id.selectAll)
                 // Wait a bit for the select all to complete.
                 val delayInMillis = 100L
                 Handler(Looper.getMainLooper()).postDelayed({
-                    ime.currentInputConnection.performContextMenuAction(android.R.id.copy)
+                    ime.currentInputConnection?.performContextMenuAction(android.R.id.copy)
                 }, delayInMillis)
             } else {
-                ime.currentInputConnection.performContextMenuAction(android.R.id.copy)
+                icCopy.performContextMenuAction(android.R.id.copy)
             }
 
             val message = ime.getString(R.string.copy)
@@ -1386,19 +1413,19 @@ fun performKeyAction(
 
         KeyAction.Paste -> {
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            ime.currentInputConnection.performContextMenuAction(android.R.id.paste)
+            ime.currentInputConnection?.performContextMenuAction(android.R.id.paste)
         }
 
         KeyAction.Undo -> {
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            ime.currentInputConnection.sendKeyEvent(
+            ime.currentInputConnection?.sendKeyEvent(
                 KeyEvent(0, 0, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_Z, 0, KeyEvent.META_CTRL_ON),
             )
         }
 
         KeyAction.Redo -> {
             keyboardSettings.textProcessor?.handleFinishInput(ime)
-            ime.currentInputConnection.sendKeyEvent(
+            ime.currentInputConnection?.sendKeyEvent(
                 KeyEvent(
                     0,
                     0,
@@ -1574,7 +1601,10 @@ fun getKeyboardMode(
 }
 
 fun getCurrentLayoutColumnCount(keyboardLayout: Int): Int {
-    val currentLayout = KeyboardLayout.entries[keyboardLayout]
+    // Clamp against the current enum size — old preferences or restored DBs can
+    // reference a layout whose ordinal no longer exists after app updates.
+    val safeIndex = keyboardLayout.coerceIn(0, KeyboardLayout.entries.size - 1)
+    val currentLayout = KeyboardLayout.entries[safeIndex]
     val keyboardDefinition = currentLayout.keyboardDefinition
     val mainKeyboard = keyboardDefinition.modes.main
     val columnCount = mainKeyboard.arr.maxOf { it.size }
@@ -1793,13 +1823,25 @@ fun Int.toBool() = this == 1
 fun Boolean.toInt() = this.compareTo(false)
 
 /**
- * The layouts there are whats stored in the DB, a string comma set of title index numbers
+ * The layouts there are whats stored in the DB, a string comma set of title index numbers.
+ *
+ * Tolerant of corrupt/outdated entries: a malformed token or an index that no
+ * longer exists (enum shrank between app versions) is dropped instead of
+ * throwing. If the result would be empty we fall back to the default layout.
  */
-fun keyboardLayoutsSetFromDbIndexString(layouts: String?): Set<KeyboardLayout> =
-    layouts?.split(",")?.map { KeyboardLayout.entries[it.trim().toInt()] }?.toSet()
-        ?: setOf(
-            KeyboardLayout.entries[DEFAULT_KEYBOARD_LAYOUT],
+fun keyboardLayoutsSetFromDbIndexString(layouts: String?): Set<KeyboardLayout> {
+    val parsed = layouts?.split(",")?.mapNotNull { token ->
+        val idx = token.trim().toIntOrNull() ?: return@mapNotNull null
+        KeyboardLayout.entries.getOrNull(idx)
+    }?.toSet().orEmpty()
+    return if (parsed.isNotEmpty()) {
+        parsed
+    } else {
+        setOf(
+            KeyboardLayout.entries[DEFAULT_KEYBOARD_LAYOUT.coerceIn(0, KeyboardLayout.entries.size - 1)],
         )
+    }
+}
 
 fun Context.getPackageInfo(): PackageInfo =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1826,16 +1868,14 @@ fun Context.getImeNames(): List<String> =
     )
 
 fun startSelection(ime: IMEService): Selection {
+    // Guard against the host app having torn down the InputConnection between
+    // the user tapping a key and us getting here (e.g. slow Activity.finish()).
+    // `currentInputConnection` is a Java platform type so Kotlin lets us
+    // dereference it without `?.`, but it is nullable in practice.
+    val ic = ime.currentInputConnection ?: return Selection()
     val cursorPosition =
-        ime.currentInputConnection
-            .getTextBeforeCursor(
-                Integer.MAX_VALUE,
-                0,
-            )?.length
-    cursorPosition?.let {
-        return Selection(it, it, true)
-    }
-    return Selection()
+        ic.getTextBeforeCursor(Integer.MAX_VALUE, 0)?.length ?: return Selection()
+    return Selection(cursorPosition, cursorPosition, true)
 }
 
 fun getLocalCurrency(): String? =

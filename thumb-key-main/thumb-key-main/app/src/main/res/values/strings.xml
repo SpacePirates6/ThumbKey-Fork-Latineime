@@ -110,6 +110,8 @@
     <string name="enable_key_fadeout">Enable key fadeout</string>
     <string name="enable_key_fadeout_summary">Keys fade to transparent after being touched</string>
     <string name="key_fadeout_time">Fadeout duration: %1$sms</string>
+    <string name="fadeout_border">Fadeout border</string>
+    <string name="fadeout_border_summary">Keep key outlines visible while keys fade</string>
     <string name="touch_through">Touch-through non-input areas</string>
     <string name="touch_through_summary">Taps on dead space pass through to the app behind the keyboard</string>
     <string name="tap_to_place">Tap to place keyboard</string>
@@ -171,7 +173,11 @@
     <string name="autocorrect_enabled">Enable autocorrect</string>
     <string name="autocorrect_enabled_desc">Automatically correct words on space/punctuation</string>
     <string name="autocorrect_threshold">Autocorrect threshold</string>
-    <string name="autocorrect_threshold_desc">Higher = more aggressive autocorrect</string>
+    <string name="autocorrect_threshold_desc">Higher = more aggressive correction</string>
+    <string name="transformer_weight">LLM prediction weight</string>
+    <string name="transformer_weight_desc">How much to trust the language model</string>
+    <string name="auto_training">Automatic training</string>
+    <string name="auto_training_desc">Train the model automatically when charging</string>
     <string name="blacklisted_words">Blacklisted words</string>
     <string name="blacklisted_words_desc">Words that will never appear as suggestions</string>
     <string name="add_blacklisted_word">Add word</string>
@@ -179,7 +185,10 @@
     <string name="model_management">Model management</string>
     <string name="current_model">Current model</string>
     <string name="no_model_loaded">No model loaded</string>
+    <string name="offensive_filter">Offensive word filter</string>
+    <string name="offensive_filter_desc">Hide offensive words from suggestions</string>
     <string name="import_model">Import model</string>
+    <string name="export_model">Export model</string>
     <string name="delete_model">Delete model</string>
     <string name="training_data">Training data</string>
     <string name="training_entries">%1$d training entries</string>
@@ -194,4 +203,9 @@
     <string name="ai_status_not_loaded">Not loaded</string>
     <string name="ai_status_loading">Loading…</string>
     <string name="user_dictionary_count">%1$d words from system dictionary</string>
+    <string name="gpu_inference">GPU inference</string>
+    <string name="gpu_inference_desc">Use OpenCL GPU acceleration for model inference (experimental, requires device with GPU OpenCL support)</string>
+    <string name="training_notification_channel">Model Training</string>
+    <string name="training_notification_title">Fine-tuning language model</string>
+    <string name="training_notification_text">Training in progress…</string>
 </resources>

@@ -34,9 +34,17 @@ class LanguageModelSwitcher(private val context: Context) {
             val bridge = PredictionBridge(context)
             val modelFile = ModelPaths.getModelForLanguage(context, locale.language)
                 ?: ModelPaths.getDefaultModelPath(context)
-            val success = bridge.initialize(modelFile)
+            val success = try {
+                bridge.initialize(modelFile)
+            } catch (e: Throwable) {
+                // Release any partial native resources even if initialize() threw.
+                try { bridge.close() } catch (_: Throwable) {}
+                throw e
+            }
 
             if (!success) {
+                // Close the failed bridge so we don't leak partial native state.
+                try { bridge.close() } catch (_: Throwable) {}
                 return@withContext null
             }
 

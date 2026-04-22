@@ -35,7 +35,7 @@ public:
     int tokenToId(const char *text);
     std::string decode(const token_sequence &tokens) const;
 
-    static LanguageModel *createLanguageModel(const std::string &paths);
+    static LanguageModel *createLanguageModel(const std::string &paths, bool useGpu = false);
     llama_context *context{};
     llama_model *model{};
     llama_batch batch{};

@@ -75,7 +75,7 @@ class LanguageModel private constructor() {
     var proximityInfoHandle: Long = 0L
 
     // Native method declarations
-    private external fun openNative(modelPath: String): Long
+    private external fun openNative(modelPath: String, useGpu: Boolean): Long
     private external fun closeNative(ptr: Long)
 
     private external fun getSuggestionsNative(
@@ -117,7 +117,7 @@ class LanguageModel private constructor() {
                     return false
                 }
 
-                modelPtr = openNative(modelPath)
+                modelPtr = openNative(modelPath, useGpu)
 
                 if (modelPtr != 0L) {
                     isLoaded = true

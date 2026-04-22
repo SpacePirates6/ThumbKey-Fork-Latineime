@@ -235,7 +235,8 @@ val KB_DE_THUMBKEY_MULTILINGUAL_SHIFTED =
         ),
     )
 
-// TODO this needs fixing, which languages are here?
+// Multilingual layout: German (base) with French (ç, é, è, ê, ë, à, â, ù, û, ô, î, ï, ÿ, œ, æ),
+// Spanish (ñ, ¿, ¡), and shared Latin diacritics (ä, ö, ü, ß, etc.).
 val KB_DE_THUMBKEY_MULTILINGUAL: KeyboardDefinition =
     KeyboardDefinition(
         title = "deutsch multilingual thumb-key",

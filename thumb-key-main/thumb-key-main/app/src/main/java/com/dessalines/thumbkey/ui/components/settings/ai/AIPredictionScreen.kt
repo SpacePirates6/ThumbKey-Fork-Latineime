@@ -16,9 +16,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.ModelTraining
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Spellcheck
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.AlertDialog
@@ -48,9 +51,11 @@ import androidx.navigation.NavController
 import com.dessalines.thumbkey.R
 import com.dessalines.thumbkey.prediction.AdapterTrainerHelper
 import com.dessalines.thumbkey.prediction.ModelPaths
+import com.dessalines.thumbkey.prediction.OffensiveWordFilter
 import com.dessalines.thumbkey.prediction.PredictionBridge
 import com.dessalines.thumbkey.prediction.SuggestionBlacklist
 import com.dessalines.thumbkey.prediction.TrainingLog
+import com.dessalines.thumbkey.prediction.TrainingWorker
 import com.dessalines.thumbkey.prediction.UserDictionaryObserver
 import com.dessalines.thumbkey.ui.components.settings.about.SettingsDivider
 import com.dessalines.thumbkey.utils.SimpleTopAppBar
@@ -58,6 +63,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import me.zhanghai.compose.preference.Preference
 import me.zhanghai.compose.preference.ProvidePreferenceTheme
+import me.zhanghai.compose.preference.SliderPreference
 import me.zhanghai.compose.preference.SwitchPreference
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,7 +80,19 @@ fun AIPredictionScreen(
     var aiEnabled by remember { mutableStateOf(aiPrefs.getBoolean("ai_enabled", true)) }
     var autocorrectEnabled by remember { mutableStateOf(aiPrefs.getBoolean("autocorrect_enabled", true)) }
     var autocorrectThreshold by remember { mutableFloatStateOf(aiPrefs.getFloat("autocorrect_threshold", 4.0f)) }
+    var autocorrectThresholdSlider by remember { mutableFloatStateOf(aiPrefs.getFloat("autocorrect_threshold", 4.0f)) }
     var transformerWeight by remember { mutableFloatStateOf(aiPrefs.getFloat("transformer_weight", 3.4f)) }
+    var transformerWeightSlider by remember { mutableFloatStateOf(aiPrefs.getFloat("transformer_weight", 3.4f)) }
+    var offensiveFilterEnabled by remember { mutableStateOf(aiPrefs.getBoolean("offensive_filter_enabled", true)) }
+    var autoTrainingEnabled by remember { mutableStateOf(aiPrefs.getBoolean("auto_training_enabled", true)) }
+    var gpuInferenceEnabled by remember { mutableStateOf(aiPrefs.getBoolean("gpu_inference_enabled", false)) }
+
+    // Model selection
+    var selectedModelName by remember {
+        mutableStateOf(aiPrefs.getString("selected_model", null) ?: "")
+    }
+    var showDeleteModelDialog by remember { mutableStateOf(false) }
+    var modelToDelete by remember { mutableStateOf<java.io.File?>(null) }
 
     // Blacklist
     val blacklist = remember { SuggestionBlacklist(ctx) }
@@ -108,6 +126,24 @@ fun AIPredictionScreen(
                 Toast.makeText(ctx, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    // Model export launcher
+    var modelToExport by remember { mutableStateOf<java.io.File?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        uri?.let { destUri ->
+            modelToExport?.let { file ->
+                try {
+                    ModelPaths.exportModel(ctx, destUri, file)
+                    Toast.makeText(ctx, "Model exported", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        modelToExport = null
     }
 
     // Save helpers
@@ -170,6 +206,111 @@ fun AIPredictionScreen(
                             )
                         }
 
+                        // ── Offensive word filter toggle ──────────────
+                        item {
+                            SwitchPreference(
+                                value = offensiveFilterEnabled,
+                                onValueChange = {
+                                    offensiveFilterEnabled = it
+                                    aiPrefs.edit().putBoolean("offensive_filter_enabled", it).apply()
+                                    OffensiveWordFilter.enabled = it
+                                },
+                                title = { Text(stringResource(R.string.offensive_filter)) },
+                                summary = { Text(stringResource(R.string.offensive_filter_desc)) },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Shield,
+                                        contentDescription = null,
+                                    )
+                                },
+                            )
+                        }
+
+                        // ── GPU inference toggle ──────────────────────
+                        item {
+                            SwitchPreference(
+                                value = gpuInferenceEnabled,
+                                onValueChange = {
+                                    gpuInferenceEnabled = it
+                                    aiPrefs.edit().putBoolean("gpu_inference_enabled", it).apply()
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            "GPU inference ${if (it) "enabled" else "disabled"}. Restart keyboard to apply.",
+                                        )
+                                    }
+                                },
+                                title = { Text(stringResource(R.string.gpu_inference)) },
+                                summary = { Text(stringResource(R.string.gpu_inference_desc)) },
+                            )
+                        }
+
+                        // ── Autocorrect threshold slider ─────────────
+                        item {
+                            SliderPreference(
+                                value = autocorrectThreshold,
+                                sliderValue = autocorrectThresholdSlider,
+                                onValueChange = {
+                                    autocorrectThreshold = it
+                                    aiPrefs.edit().putFloat("autocorrect_threshold", it).apply()
+                                },
+                                onSliderValueChange = { autocorrectThresholdSlider = it },
+                                valueRange = 1.0f..10.0f,
+                                title = {
+                                    Text(stringResource(R.string.autocorrect_threshold))
+                                },
+                                summary = {
+                                    Text("%.1f — %s".format(
+                                        autocorrectThreshold,
+                                        stringResource(R.string.autocorrect_threshold_desc),
+                                    ))
+                                },
+                            )
+                        }
+
+                        // ── Transformer weight slider ────────────────
+                        item {
+                            SliderPreference(
+                                value = transformerWeight,
+                                sliderValue = transformerWeightSlider,
+                                onValueChange = {
+                                    transformerWeight = it
+                                    aiPrefs.edit().putFloat("transformer_weight", it).apply()
+                                },
+                                onSliderValueChange = { transformerWeightSlider = it },
+                                valueRange = 0.5f..10.0f,
+                                title = {
+                                    Text(stringResource(R.string.transformer_weight))
+                                },
+                                summary = {
+                                    Text("%.1f — %s".format(
+                                        transformerWeight,
+                                        stringResource(R.string.transformer_weight_desc),
+                                    ))
+                                },
+                            )
+                        }
+
+                        // ── Auto-training toggle ─────────────────────
+                        item {
+                            SwitchPreference(
+                                value = autoTrainingEnabled,
+                                onValueChange = {
+                                    autoTrainingEnabled = it
+                                    aiPrefs.edit().putBoolean("auto_training_enabled", it).apply()
+                                    if (it) TrainingWorker.schedule(ctx)
+                                    else TrainingWorker.cancel(ctx)
+                                },
+                                title = { Text(stringResource(R.string.auto_training)) },
+                                summary = { Text(stringResource(R.string.auto_training_desc)) },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Schedule,
+                                        contentDescription = null,
+                                    )
+                                },
+                            )
+                        }
+
                         item { SettingsDivider() }
 
                         // ── Model management ────────────────────────
@@ -193,13 +334,35 @@ fun AIPredictionScreen(
                             )
                         }
 
-                        // List models
+                        // List models with selection and delete
                         items(models) { model ->
+                            val isActive = if (selectedModelName.isNotEmpty()) {
+                                model.name == selectedModelName
+                            } else {
+                                model == models.maxByOrNull { it.lastModified() }
+                            }
                             Preference(
-                                title = { Text(model.name) },
-                                summary = { Text("${model.length() / 1024 / 1024}MB") },
+                                title = {
+                                    Text(
+                                        model.name,
+                                        fontWeight = if (isActive) {
+                                            androidx.compose.ui.text.font.FontWeight.Bold
+                                        } else null,
+                                    )
+                                },
+                                summary = {
+                                    val sizeMb = model.length() / 1024 / 1024
+                                    Text(
+                                        if (isActive) "${sizeMb}MB — active"
+                                        else "${sizeMb}MB — tap to select",
+                                    )
+                                },
                                 onClick = {
-                                    // Could add model selection here in the future
+                                    selectedModelName = model.name
+                                    ModelPaths.setSelectedModel(ctx, model.name)
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Model selected. Restart keyboard to apply.")
+                                    }
                                 },
                             )
                         }
@@ -216,6 +379,60 @@ fun AIPredictionScreen(
                                 },
                                 onClick = {
                                     importLauncher.launch(arrayOf("*/*"))
+                                },
+                            )
+                        }
+
+                        // Export model
+                        item {
+                            Preference(
+                                title = { Text(stringResource(R.string.export_model)) },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.FileDownload,
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    val active = models.firstOrNull {
+                                        if (selectedModelName.isNotEmpty()) it.name == selectedModelName
+                                        else it == models.maxByOrNull { m -> m.lastModified() }
+                                    }
+                                    if (active != null) {
+                                        modelToExport = active
+                                        exportLauncher.launch(active.name)
+                                    } else {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("No model to export")
+                                        }
+                                    }
+                                },
+                            )
+                        }
+
+                        // Delete model
+                        item {
+                            Preference(
+                                title = { Text(stringResource(R.string.delete_model)) },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Outlined.Delete,
+                                        contentDescription = null,
+                                    )
+                                },
+                                onClick = {
+                                    val active = models.firstOrNull {
+                                        if (selectedModelName.isNotEmpty()) it.name == selectedModelName
+                                        else it == models.maxByOrNull { m -> m.lastModified() }
+                                    }
+                                    if (active != null) {
+                                        modelToDelete = active
+                                        showDeleteModelDialog = true
+                                    } else {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("No model to delete")
+                                        }
+                                    }
                                 },
                             )
                         }
@@ -397,6 +614,37 @@ fun AIPredictionScreen(
             }
         },
     )
+
+    // ── Delete model confirmation dialog ─────────────────────────────
+    if (showDeleteModelDialog && modelToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteModelDialog = false; modelToDelete = null },
+            title = { Text(stringResource(R.string.delete_model)) },
+            text = { Text("Delete \"${modelToDelete!!.name}\"? This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        ModelPaths.deleteModel(modelToDelete!!)
+                        if (selectedModelName == modelToDelete!!.name) {
+                            selectedModelName = ""
+                            ModelPaths.setSelectedModel(ctx, null)
+                        }
+                        models = ModelPaths.getModels(ctx)
+                        showDeleteModelDialog = false
+                        modelToDelete = null
+                        scope.launch {
+                            snackbarHostState.showSnackbar("Model deleted")
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteModelDialog = false; modelToDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
 
     // ── Add blacklist word dialog ────────────────────────────────────
     if (showAddBlacklistDialog) {

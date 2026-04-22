@@ -126,7 +126,14 @@ object ModelPaths {
      */
     fun getModelOptions(context: Context): Map<String, File> {
         val directory = getModelDirectory(context)
-        ensureDefaultModelExists(context)
+
+        // Fast path: if we already have at least one model, skip the resource-copy dance.
+        val existing = directory.listFiles()
+            ?.filter { it.isFile && isModelFile(it.name) }
+            ?: emptyList()
+        if (existing.isEmpty()) {
+            ensureDefaultModelExists(context)
+        }
 
         val result = mutableMapOf<String, File>()
 
@@ -170,11 +177,28 @@ object ModelPaths {
         return options[languageCode.lowercase()] ?: options["default"]
     }
 
+    fun setSelectedModel(context: Context, filename: String?) {
+        context.getSharedPreferences("ai_settings", Context.MODE_PRIVATE)
+            .edit().putString("selected_model", filename).apply()
+    }
+
+    fun getSelectedModelName(context: Context): String? {
+        return context.getSharedPreferences("ai_settings", Context.MODE_PRIVATE)
+            .getString("selected_model", null)
+    }
+
     /**
      * Get the default model file path.
+     * Respects user selection from settings if available.
      */
     fun getDefaultModelPath(context: Context): File? {
         val directory = getModelDirectory(context)
+
+        val selected = getSelectedModelName(context)
+        if (selected != null) {
+            val selectedFile = File(directory, selected)
+            if (selectedFile.isFile && selectedFile.length() > 0) return selectedFile
+        }
 
         val existingModel = directory.listFiles()
             ?.filter { it.isFile && isModelFile(it.name) }
@@ -220,23 +244,31 @@ object ModelPaths {
         }
 
         context.contentResolver.openInputStream(uri)?.use { inputStream ->
-            val bytes = ByteArray(1024)
-            var read = inputStream.read(bytes)
+            // Read the magic header robustly. A single read() may return fewer than
+            // 4 bytes on slow streams; keep reading until we have enough or hit EOF.
+            val magic = ByteArray(4)
+            var magicRead = 0
+            while (magicRead < 4) {
+                val n = inputStream.read(magic, magicRead, 4 - magicRead)
+                if (n <= 0) break
+                magicRead += n
+            }
 
-            // Validate GGUF magic
             if (file.extension.lowercase() == "gguf") {
-                if (read < 4 ||
-                    bytes[0] != 'G'.code.toByte() ||
-                    bytes[1] != 'G'.code.toByte() ||
-                    bytes[2] != 'U'.code.toByte() ||
-                    bytes[3] != 'F'.code.toByte()
+                if (magicRead < 4 ||
+                    magic[0] != 'G'.code.toByte() ||
+                    magic[1] != 'G'.code.toByte() ||
+                    magic[2] != 'U'.code.toByte() ||
+                    magic[3] != 'F'.code.toByte()
                 ) {
                     throw IllegalArgumentException("\"${file.name}\" is not a valid GGUF file")
                 }
             }
 
             file.outputStream().use { outputStream ->
-                outputStream.write(bytes, 0, read)
+                if (magicRead > 0) outputStream.write(magic, 0, magicRead)
+                val bytes = ByteArray(8192)
+                var read: Int
                 while (inputStream.read(bytes).also { read = it } != -1) {
                     outputStream.write(bytes, 0, read)
                 }

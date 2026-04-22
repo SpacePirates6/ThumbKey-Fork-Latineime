@@ -142,14 +142,25 @@ fun KeyboardKey(
     opacityAlpha: Float = 1f,
     enableKeyFadeout: Boolean = false,
     keyFadeoutTimeMs: Int = 1000,
+    // When true (and key fadeout is on), the key outline stays fully opaque
+    // during the fade — only the fill/text fade out. See LookAndFeelScreen
+    // "Fadeout border" toggle.
+    fadeoutBorder: Boolean = true,
     predictionEngine: com.dessalines.thumbkey.prediction.PredictionEngine? = null,
 ) {
     val ctx = LocalContext.current
     val ime = ctx as IMEService
     val scope = rememberCoroutineScope()
 
-    // Don't show animations for password fields
-    val isPasswordField by remember { mutableStateOf(isPasswordField(ime)) }
+    // Don't show animations for password fields.
+    // NOTE: the IME reuses `ComposeKeyboardView` across field changes, so a plain
+    // `isPasswordField(ime)` read would never re-run on focus change. We key the
+    // remember on `ime.inputStartGeneration.intValue`, which bumps inside
+    // `IMEService.onStartInput`, forcing a re-read whenever the user focuses a
+    // different field. Without this, the key-release reveal animation could
+    // briefly leak which key was tapped in a password field.
+    val inputGen = ime.inputStartGeneration.intValue
+    val isPasswordField = remember(inputGen) { isPasswordField(ime) }
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
@@ -259,9 +270,30 @@ fun KeyboardKey(
         }
     }
 
+    // When the user wants to preserve the outline during key fade-out
+    // ("Fadeout border" toggle = ON, default), we draw the border BEFORE the
+    // alpha() modifier so the stroke is not pulled into the fading graphics
+    // layer. The background and children (text) still sit inside the faded
+    // layer and fade normally. When the toggle is OFF, we fall back to the
+    // original behavior (everything fades together).
+    val borderAboveFade = fadeoutBorder && enableKeyFadeout && keyBorderWidth > 0.0
+    val borderColorResolved = if (helperFullOpacity) {
+        keyBorderColour.copy(alpha = keyBorderColour.alpha * opacityAlpha)
+    } else {
+        keyBorderColour
+    }
+    val borderModifierOrNoop: Modifier = if (keyBorderWidth > 0.0) {
+        Modifier.border(
+            keyBorderWidth.dp,
+            borderColorResolved,
+            shape = RoundedCornerShape(keyRadius.dp),
+        )
+    } else {
+        Modifier
+    }
+
     val keyboardKeyModifier =
         Modifier
-            .alpha(displayAlpha)
             .height(keyHeight.dp)
             .width(keyWidth.dp * key.widthMultiplier)
             .padding(keyPadding.dp)
@@ -270,22 +302,10 @@ fun KeyboardKey(
                 keySizePx = coordinates.size
             }
             .clip(RoundedCornerShape(keyRadius.dp))
+            .then(if (borderAboveFade) borderModifierOrNoop else Modifier)
+            .alpha(displayAlpha)
+            .then(if (borderAboveFade) Modifier else borderModifierOrNoop)
             .then(
-                if (keyBorderWidth > 0.0) {
-                    val borderColor = if (helperFullOpacity) {
-                        keyBorderColour.copy(alpha = keyBorderColour.alpha * opacityAlpha)
-                    } else {
-                        keyBorderColour
-                    }
-                    Modifier.border(
-                        keyBorderWidth.dp,
-                        borderColor,
-                        shape = RoundedCornerShape(keyRadius.dp),
-                    )
-                } else {
-                    (Modifier)
-                },
-            ).then(
                 if (helperFullOpacity) {
                     Modifier
                 } else {

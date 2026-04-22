@@ -6,6 +6,7 @@ import android.util.Log
 import com.dessalines.thumbkey.db.ClipboardRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
@@ -15,7 +16,12 @@ class ThumbKeyClipboardManager(
 ) {
     private val systemClipboardManager =
         context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // We hold onto the root Job so `stopListening()` can cancel it; previously
+    // this scope was never cancelled, so repository coroutines could keep
+    // running after the IME was torn down (retaining the Context + repository
+    // references indefinitely).
+    private var job: Job = SupervisorJob()
+    private var scope: CoroutineScope = CoroutineScope(job + Dispatchers.IO)
     private var isListening = false
     private var lastClipText: String? = null
 
@@ -34,6 +40,11 @@ class ThumbKeyClipboardManager(
 
     fun startListening() {
         if (!isListening) {
+            // Rebuild the scope in case stopListening() cancelled the previous one.
+            if (!job.isActive) {
+                job = SupervisorJob()
+                scope = CoroutineScope(job + Dispatchers.IO)
+            }
             systemClipboardManager.addPrimaryClipChangedListener(clipboardListener)
             isListening = true
         }
@@ -44,6 +55,9 @@ class ThumbKeyClipboardManager(
             systemClipboardManager.removePrimaryClipChangedListener(clipboardListener)
             isListening = false
         }
+        // Cancel any in-flight writes (retention decisions, expiry sweeps) so
+        // the scope doesn't outlive the IME instance.
+        job.cancel()
     }
 
     fun clearExpired() {

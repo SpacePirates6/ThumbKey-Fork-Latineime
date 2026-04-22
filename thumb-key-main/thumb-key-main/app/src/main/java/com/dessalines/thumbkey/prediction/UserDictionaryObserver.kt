@@ -90,11 +90,15 @@ class UserDictionaryObserver(context: Context) {
             val localeColumn = it.getColumnIndex(UserDictionary.Words.LOCALE)
             val shortcutColumn = it.getColumnIndex(UserDictionary.Words.SHORTCUT)
 
+            // The WORD column is mandatory for anything useful. Bail if the provider
+            // doesn't expose it (avoids getString(-1) throwing).
+            if (wordColumn < 0) return@use
+
             while (it.moveToNext()) {
-                val word = it.getString(wordColumn)
-                val frequency = it.getInt(frequencyColumn)
-                val locale = it.getString(localeColumn)
-                val shortcut = it.getString(shortcutColumn)
+                val word = it.getString(wordColumn) ?: continue
+                val frequency = if (frequencyColumn >= 0) it.getInt(frequencyColumn) else 0
+                val locale = if (localeColumn >= 0) it.getString(localeColumn) else null
+                val shortcut = if (shortcutColumn >= 0) it.getString(shortcutColumn) else null
 
                 if (word.length < 64) {
                     newWords.add(Word(word, frequency, locale, shortcut))

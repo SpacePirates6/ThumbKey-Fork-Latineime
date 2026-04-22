@@ -103,7 +103,12 @@ class TrainingLog(private val context: Context) {
     fun unlearnWord(committedWord: String, ngramContext: String) {
         val keyToSearch = "$ngramContext $committedWord".trim()
         synchronized(lock) {
-            val idx = entries.indexOfLast { it.key.startsWith(keyToSearch) || it.key == keyToSearch }
+            // Also fall back to committedWord-only match in case the prior
+            // context drifted between learning and unlearning.
+            val idx = entries.indexOfLast {
+                it.key.startsWith(keyToSearch) ||
+                    it.committedWord.equals(committedWord, ignoreCase = true)
+            }
             if (idx != -1) {
                 entries.removeAt(idx)
                 Log.d(TAG, "Unlearned: $committedWord")
@@ -114,13 +119,38 @@ class TrainingLog(private val context: Context) {
     /**
      * Get all training examples as strings suitable for adapter training.
      * Each example is a context + committed word pair.
+     *
+     * @param locale If non-null, only return entries matching this locale code.
      */
-    fun getTrainingExamples(): List<String> {
+    fun getTrainingExamples(locale: String? = null): List<String> {
         return synchronized(lock) {
-            entries.map { entry ->
+            val filtered = if (locale != null) entries.filter { it.locale == locale } else entries
+            filtered.map { entry ->
                 val ctx = entry.priorContext.ifBlank { entry.ngramContext }
                 "$ctx ${entry.committedWord} "
             }
+        }
+    }
+
+    /**
+     * Get augmented training examples with synthetic misspelling variants.
+     * Mirrors FUTO's TrainingDataGenerator approach.
+     *
+     * @param locale If non-null, only return entries matching this locale code.
+     */
+    fun getAugmentedTrainingExamples(locale: String? = null): List<String> {
+        return synchronized(lock) {
+            val filtered = if (locale != null) entries.filter { it.locale == locale } else entries
+            filtered.flatMap { entry -> TrainingDataGenerator.augmentEntry(entry) }
+        }
+    }
+
+    /**
+     * Get the set of distinct locale codes present in the log.
+     */
+    fun getLocales(): Set<String> {
+        return synchronized(lock) {
+            entries.map { it.locale }.toSet()
         }
     }
 

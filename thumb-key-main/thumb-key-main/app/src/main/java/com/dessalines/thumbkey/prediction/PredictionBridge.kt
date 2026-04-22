@@ -141,11 +141,14 @@ class PredictionBridge(private val context: Context) {
                     Log.i(TAG, "Loading model: ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
                     setCrashGuardLoading(true)
 
+                    val gpuEnabled = context.getSharedPreferences("ai_settings", Context.MODE_PRIVATE)
+                        .getBoolean("gpu_inference_enabled", false)
+
                     val success = try {
                         languageModel.load(
                             modelPath = modelFile.absolutePath,
                             cacheDir = ModelPaths.getModelDirectory(context).absolutePath,
-                            useGpu = false,
+                            useGpu = gpuEnabled,
                         )
                     } catch (e: UnsatisfiedLinkError) {
                         Log.e(TAG, "Native library not loaded", e)

@@ -242,8 +242,14 @@ class PredictionEngine(private val context: Context) :
 
     private val touchXBuffer = mutableListOf<Int>()
     private val touchYBuffer = mutableListOf<Int>()
+    private val touchBufferMaxSize = 50 // mirrors WordComposer.MAX_WORD_LENGTH
 
     fun recordTouchCoordinate(x: Int, y: Int) {
+        if (touchXBuffer.size >= touchBufferMaxSize) {
+            // Drop oldest to keep the buffer aligned with the current word length.
+            touchXBuffer.removeAt(0)
+            touchYBuffer.removeAt(0)
+        }
         touchXBuffer.add(x)
         touchYBuffer.add(y)
     }
@@ -316,6 +322,11 @@ class PredictionEngine(private val context: Context) :
         phantomSpacePending = false
         lastSpaceTimestamp = 0L
         lastDoubleSpacePeriod = false
+        // Reset adaptive debounce so a slow prior field doesn't penalize the new one.
+        queryDelayMs = 100L
+        avgPredictionTimeMs = 80L
+        consecutiveTimeouts = 0
+        transformerTempDisabled = false
     }
 
     private var nativeProximityInfo: NativeProximityInfo? = null
@@ -328,7 +339,10 @@ class PredictionEngine(private val context: Context) :
             proximityModel = ThumbKeyProximityModel(keyboard)
         }
 
+        // Release FIRST then null out to prevent double-release if rebuild fails.
         nativeProximityInfo?.release()
+        nativeProximityInfo = null
+        predictionBridge?.setProximityInfoHandle(0L)
         try {
             val npi = NativeProximityInfo.fromKeyboard(keyboard)
             nativeProximityInfo = npi
@@ -457,7 +471,16 @@ class PredictionEngine(private val context: Context) :
         ic.endBatchEdit()
 
         val wordToUnlearn = record.correctedWord
-        dictExecutor.submit { userHistoryDictionary?.unlearn(wordToUnlearn) }
+        val contextForUnlearn = lastTextBeforeCursor
+        dictExecutor.submit {
+            userHistoryDictionary?.unlearn(wordToUnlearn)
+            // Also remove the training log entry so the adapter-training run doesn't
+            // re-teach the same bad autocorrect.
+            val ngram = contextForUnlearn
+                .dropLast(wordToUnlearn.length.coerceAtMost(contextForUnlearn.length))
+                .trim().split(" ").takeLast(3).joinToString(" ")
+            trainingLog?.unlearnWord(wordToUnlearn, ngram)
+        }
 
         Log.d(TAG, "Undo autocorrect: \"${record.correctedWord}\" → \"${record.originalWord}\"")
         lastAutocorrect = null
@@ -558,7 +581,13 @@ class PredictionEngine(private val context: Context) :
         }
 
         clearSuggestions()
-        phantomSpacePending = true
+        // NOTE: we deliberately do NOT set phantomSpacePending = true here.
+        // A real trailing space was already committed above (either in the
+        // replacement branch or the next-word branch), and the phantom-space
+        // flag would cause Utils.kt::performKeyAction to commit ANOTHER space
+        // before the next character, producing "foxtrot  L" from a single tap.
+        // `onBackspace` also expects the literal "word " in the buffer to undo
+        // the correction, so the real-space-only contract is correct here.
         onKeyAction(ime)
     }
 
@@ -859,7 +888,7 @@ class PredictionEngine(private val context: Context) :
 
         val binDict = binaryDictionary
         if (binDict != null && binDict.isLoaded()) {
-            val completions = binDict.getCompletions(typedWord, 5)
+            val completions = binDict.getCompletions(typedWord, 8)
             for ((word, freq) in completions) {
                 if (word.equals(typedWord, ignoreCase = true)) continue
                 if (blacklist != null && !blacklist.isSuggestionOk(word)) continue
@@ -910,7 +939,7 @@ class PredictionEngine(private val context: Context) :
 
         val histDict = userHistoryDictionary
         if (histDict != null && prevWord != null) {
-            val bigramCompletions = histDict.getCompletions("", 10)
+            val bigramCompletions = histDict.getTopK(10)
             for ((word, freq) in bigramCompletions) {
                 if (blacklist != null && !blacklist.isSuggestionOk(word)) continue
                 if (OffensiveWordFilter.isOffensive(word)) continue
@@ -978,16 +1007,23 @@ class PredictionEngine(private val context: Context) :
         val blacklist = suggestionBlacklist
         val merged = HashMap<String, ScoredSuggestion>(32)
 
-        // Start with pre-gathered dictionary results
+        // When the user is mid-word, only completions of what they've typed are relevant.
+        // LLM next-word predictions ("a", "with", "and" after "sex") must never outrank
+        // legitimate completions ("sexual", "sexy"). We accomplish this by simply refusing
+        // any LLM or spell-checker prediction that doesn't start with the typed prefix.
+        val midWord = typedWord.length >= 2
+
+        // Start with pre-gathered dictionary results (all are already prefix-matched)
         for ((key, s) in dictSuggestions) {
             merged[key] = ScoredSuggestion(s.word, s.score, s.source, s.agreedByBoth)
         }
 
-        // Layer in LLM results
+        // Layer in LLM results — mid-word: completions only; post-word: anything
         for ((word, score) in lmPredictions) {
             if (blacklist != null && !blacklist.isSuggestionOk(word)) continue
             if (OffensiveWordFilter.isOffensive(word)) continue
             if (word.equals(typedWord, ignoreCase = true)) continue
+            if (midWord && !word.startsWith(typedWord, ignoreCase = true)) continue
             val key = word.lowercase()
             val lmScore = (score * 1000 * tWeight).toInt()
             val existing = merged[key]
@@ -999,11 +1035,12 @@ class PredictionEngine(private val context: Context) :
             }
         }
 
-        // Layer in spell checker results
+        // Layer in spell checker results — mid-word: completions only
         for (word in spellResults) {
             if (blacklist != null && !blacklist.isSuggestionOk(word)) continue
             if (OffensiveWordFilter.isOffensive(word)) continue
             if (word.equals(typedWord, ignoreCase = true)) continue
+            if (midWord && !word.startsWith(typedWord, ignoreCase = true)) continue
             val key = word.lowercase()
             val existing = merged[key]
             if (existing != null) {
@@ -1011,6 +1048,30 @@ class PredictionEngine(private val context: Context) :
                 existing.agreedByBoth = true
             } else {
                 merged[key] = ScoredSuggestion(word, 100, Source.SPELLCHECK)
+            }
+        }
+
+        // ── LLM rescoring of non-LLM candidates ─────────────────────
+        val bridge = predictionBridge
+        if (bridge != null && bridge.isReady()) {
+            val rescoreCandidates = merged.values
+                .filter { it.source != Source.EMOJI && it.source != Source.CLIPBOARD && it.source != Source.LLM }
+                .sortedByDescending { it.score }
+                .take(8)
+            if (rescoreCandidates.size >= 2) {
+                try {
+                    val words = rescoreCandidates.map { it.word }
+                    val scores = rescoreCandidates.map { it.score }
+                    val rescored = bridge.rescoreSuggestions(textBefore, words, scores)
+                    if (rescored != null && rescored.size == rescoreCandidates.size) {
+                        for (i in rescoreCandidates.indices) {
+                            val key = rescoreCandidates[i].word.lowercase()
+                            merged[key]?.let { entry -> entry.score = rescored[i] }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Rescoring failed, using original scores", e)
+                }
             }
         }
 
@@ -1428,6 +1489,15 @@ class PredictionEngine(private val context: Context) :
         val ic = ime.currentInputConnection ?: return
         if (result.decodedWord.length < 2) return
 
+        // In password fields, swipe typing still commits characters (so the user can type
+        // their password) but we skip all prediction, suggestion display, and learning.
+        if (suppressPredictions) {
+            ic.commitText(result.decodedWord, 1)
+            ic.commitText(" ", 1)
+            ime.ignoreNextCursorMove()
+            return
+        }
+
         gestureResultPending = true
         val textBefore = ic.getTextBeforeCursor(200, 0)?.toString() ?: ""
         lastTextBeforeCursor = textBefore
@@ -1440,6 +1510,7 @@ class PredictionEngine(private val context: Context) :
         if (bridge != null && bridge.isReady()) {
             val blacklist = suggestionBlacklist?.bannedWordsArray ?: emptyArray()
             val swipeText = "$textBefore${result.decodedWord}"
+            val learn = !suppressLearning
 
             lmExecutor.submit {
                 try {
@@ -1475,8 +1546,10 @@ class PredictionEngine(private val context: Context) :
                                 ic.commitText(" ", 1)
                                 ime.ignoreNextCursorMove()
 
-                                val prevWord = previousWordBeforeCursor(ic)
-                                userHistoryDictionary?.recordWord(topWord, prevWord)
+                                if (learn) {
+                                    val prevWord = previousWordBeforeCursor(ic)
+                                    userHistoryDictionary?.recordWord(topWord, prevWord)
+                                }
                             }
 
                             suggestions.clear()
@@ -1487,12 +1560,19 @@ class PredictionEngine(private val context: Context) :
                         }
                     }
                 } catch (e: Throwable) {
-                    gestureResultPending = false
-                    gestureCancelled = false
                     Log.w(TAG, "Gesture LLM prediction failed", e)
                     mainHandler.post {
-                        ic.commitText(result.decodedWord, 1)
-                        ic.commitText(" ", 1)
+                        gestureResultPending = false
+                        val cancelled = gestureCancelled
+                        gestureCancelled = false
+                        // Honor cancellation even in the failure path - if the user already
+                        // cancelled (e.g. started a new gesture), don't commit stale text at
+                        // whatever cursor position is active now.
+                        if (!cancelled) {
+                            ic.commitText(result.decodedWord, 1)
+                            ic.commitText(" ", 1)
+                            ime.ignoreNextCursorMove()
+                        }
                     }
                 }
             }
@@ -1501,6 +1581,7 @@ class PredictionEngine(private val context: Context) :
             gestureCancelled = false
             ic.commitText(result.decodedWord, 1)
             ic.commitText(" ", 1)
+            ime.ignoreNextCursorMove()
         }
     }
 
@@ -1510,12 +1591,6 @@ class PredictionEngine(private val context: Context) :
         val ic = ime.currentInputConnection ?: return
 
         val before = ic.getTextBeforeCursor(50, 0)?.toString() ?: return
-        val wordAndSpace = before.takeLastWhile { it != ' ' }.let { w ->
-            if (before.length > w.length && before[before.length - w.length - 1] == ' ') {
-                w
-            } else w
-        }
-
         val toDelete = before.trimEnd().takeLastWhile { it.isLetter() || it == '\'' }
         if (toDelete.isNotEmpty()) {
             ic.beginBatchEdit()
@@ -1526,8 +1601,10 @@ class PredictionEngine(private val context: Context) :
             ic.endBatchEdit()
             ime.ignoreNextCursorMove()
 
-            val prevWord = previousWordBeforeCursor(ic)
-            userHistoryDictionary?.recordWord(selected.word, prevWord)
+            if (!suppressLearning) {
+                val prevWord = previousWordBeforeCursor(ic)
+                userHistoryDictionary?.recordWord(selected.word, prevWord)
+            }
         }
 
         clearSuggestions()
@@ -1540,7 +1617,7 @@ class PredictionEngine(private val context: Context) :
         exitRecorrection()
         lastDoubleSpacePeriod = false
 
-        if (PredictionEngine.isWordSeparator(char)) {
+        if (isWordSeparator(char)) {
             wordComposer.reset()
             phantomSpacePending = false
             if (isComposing) {

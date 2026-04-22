@@ -9,7 +9,6 @@ import android.hardware.SensorManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -42,7 +41,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.isActive
@@ -82,6 +80,10 @@ class FracturingChar(
     )
 
     var alpha by mutableFloatStateOf(1f)
+    // Running time (seconds) since spawn, used for the piecewise alpha curve.
+    // Kept separate from `alpha` so the curve can hold peak intensity for a
+    // while before the fade begins, instead of a pure linear decay.
+    var ageSec by mutableFloatStateOf(0f)
     var isDead by mutableStateOf(false)
 
     private fun createFragment(leftPct: Float, topPct: Float, rightPct: Float, bottomPct: Float): CharFragment {
@@ -127,6 +129,11 @@ fun rememberAccelerometerSensor(enabled: Boolean): androidx.compose.runtime.Stat
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
+        // Some devices (Android emulators w/o sensor HAL, unusual hardware)
+        // don't expose an accelerometer at all. Skip registration rather than
+        // passing a null sensor to registerListener, which is undefined.
+        if (sensor == null) return@DisposableEffect onDispose {}
+
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent?) {
                 if (event?.sensor?.type == Sensor.TYPE_ACCELEROMETER) {
@@ -171,7 +178,11 @@ fun FloatingCharOverlay(
         MaterialTheme.colorScheme.onSurface
     }
     val shadowColor = if (isSystemDarkMode) Color.Black else Color.White
-    val fractureColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+    // Key-decay particles are always white, against a darker-outlined shadow so
+    // they read on both light and dark backgrounds.  The alpha fade is driven
+    // by `FracturingChar.alpha`; starting at 1.0 here keeps peak intensity.
+    val fractureColor = Color.White
+    val fractureShadowColor = Color.Black.copy(alpha = 0.55f)
 
     val overlayWidth = overlaySize.width.toFloat()
     val overlayHeight = overlaySize.height.toFloat()
@@ -194,13 +205,17 @@ fun FloatingCharOverlay(
             overlayHeight = overlayHeight,
             textMeasurer = textMeasurer,
             color = fractureColor,
-            shadowColor = shadowColor,
+            shadowColor = fractureShadowColor,
             onCharAnimationFinished = onFractureComplete,
             realisticGravityEnabled = realisticGravityEnabled,
         )
 
-        for (i in 0 until floatingChars.size) {
-            val fc = floatingChars.getOrNull(i) ?: continue
+        // Iterate via a snapshot-safe copy: when `onComplete` callbacks remove
+        // items mid-recomposition (several chars arriving at the cursor within
+        // the same frame), an index-based loop over the live SnapshotStateList
+        // can skip children and force their LaunchedEffects to re-initialise on
+        // the next frame — that's a whole-batch "jitter" / restart.
+        for (fc in floatingChars.toList()) {
             key(fc.id) {
                 val onComplete = remember<() -> Unit>(fc.id) {
                     { floatingChars.removeAll { it.id == fc.id } }
@@ -300,7 +315,21 @@ private fun FractureOverlay(
                         }
                     }
 
-                    char.alpha -= 0.8f * dt
+                    // Piecewise lifetime (~2.5 s total):
+                    //   0.0 .. 1.5 s  — hold at full opacity while the debris
+                    //                   is still readable and falling.
+                    //   1.5 .. 2.5 s  — linear fade out.
+                    // Chosen so a full-word deletion leaves particles on screen
+                    // long enough to register as debris rather than a flicker,
+                    // without cluttering the overlay for very long.
+                    char.ageSec += dt
+                    val hold = 1.5f
+                    val fade = 1.0f
+                    char.alpha = when {
+                        char.ageSec <= hold -> 1f
+                        char.ageSec >= hold + fade -> 0f
+                        else -> 1f - (char.ageSec - hold) / fade
+                    }
                     if (char.alpha <= 0f) {
                         char.isDead = true
                         deadIdBuffer.add(char.id)
@@ -397,6 +426,11 @@ private fun FloatingCharItem(
         val fallbackTargetX = currentOverlayTopLeft.x + currentOverlayWidth / 2f
         val fallbackTargetY = currentOverlayTopLeft.y + currentOverlayHeight / 3f
 
+        // Re-read cursor AFTER the spawn delay — for sequential spray emits the
+        // per-char delay can accumulate and the cursor may have been reported
+        // late (CursorAnchorInfo lags commitText by a frame or two).  Using the
+        // fresh reading avoids locking the whole spray batch to a stale NaN
+        // fallback target.
         val initTargetX = if (!latestCursorX.isNaN()) latestCursorX else fallbackTargetX
         val initTargetY = if (!latestCursorY.isNaN()) latestCursorY else fallbackTargetY
 
@@ -422,6 +456,21 @@ private fun FloatingCharItem(
         } else {
             velX *= dragVelScale
             velY *= dragVelScale
+            // Anti-overshoot: if the inherited swipe velocity is pointing away from the target,
+            // the wrong-way component causes a long rubberband arc before homing takes over.
+            // Scale the component of velocity that points *away* from the target, keeping the
+            // component that already points toward it. This gives steering a huge head start
+            // without making the flick feel snapped.
+            val dirX = dx0 / dist0
+            val dirY = dy0 / dist0
+            val vAlong = velX * dirX + velY * dirY
+            if (vAlong < 0f) {
+                // Remove 85% of the opposing velocity; keep 15% for a gentle "correction arc".
+                val wrongX = dirX * vAlong
+                val wrongY = dirY * vAlong
+                velX -= wrongX * 0.85f
+                velY -= wrongY * 0.85f
+            }
             val speed = sqrt(velX * velX + velY * velY)
             if (speed > maxSpeed) {
                 velX = velX / speed * maxSpeed
@@ -432,11 +481,35 @@ private fun FloatingCharItem(
         var prevNanos = 0L
         var totalTime = 0f
         val sprayFreeFlight = 0.08f
+        // Track distance between frames for the near-latch heuristic.  Starts
+        // as NaN so the bootstrap frame can seed it from the actual current
+        // distance rather than from `dist0` — otherwise a single-frame cursor
+        // jump at spawn looks like an overshoot and kills the char before it
+        // ever moves.  See Bug 3 in FLOATING-ANIM notes.
+        var prevDist = Float.NaN
+        // Widen arrival for high-speed passes: if the char flies through the target fast,
+        // a single frame can skip the entire ARRIVE_RADIUS window. Track whether we've
+        // ever been close, so we can latch an arrival even if one frame overshoots.
+        var everNear = false
+        val nearLatchRadius = ARRIVE_RADIUS * 2.5f
+        // Reference distance for the alpha fade.  Re-captured on the first real
+        // frame so a cursor update arriving between spawn and first integration
+        // doesn't lock the denominator to a stale `dist0`.
+        var fadeRefDist = dist0
 
         while (isActive && fc.active) {
             val nanos = withFrameNanos { it }
             if (prevNanos == 0L) {
                 prevNanos = nanos
+                // Seed prev-distance and fade reference from the char's real
+                // current position on the bootstrap frame.  Prevents spurious
+                // "everNear && dist > prevDist" triggers on frame 2 when the
+                // char has moved and prev was stuck on dist0.
+                val bootToX = (if (!latestCursorX.isNaN()) latestCursorX else fallbackTargetX) - fc.posX
+                val bootToY = (if (!latestCursorY.isNaN()) latestCursorY else fallbackTargetY) - fc.posY
+                val bootDist = sqrt(bootToX * bootToX + bootToY * bootToY)
+                prevDist = bootDist
+                fadeRefDist = bootDist.coerceAtLeast(1f)
                 continue
             }
             val dt = ((nanos - prevNanos) / 1_000_000_000f).coerceAtMost(0.05f)
@@ -450,8 +523,30 @@ private fun FloatingCharItem(
             val toY = targetY - fc.posY
             val dist = sqrt(toX * toX + toY * toY)
 
+            // Standard arrival + time-out.  `fc.active = false` stops the
+            // loop; the smooth fade-out runs after `break` so the char
+            // doesn't pop in a single frame (important when a whole spray
+            // batch arrives together).
             if (dist < ARRIVE_RADIUS || totalTime >= maxTime) {
-                fc.alpha = 0f
+                fc.active = false
+                break
+            }
+
+            // Pass-through / near-latch: if we were inside the soft-arrive ring and the
+            // distance just started growing, call it arrived. Kills the rubberband pass.
+            //
+            // Bug 2 fix: require that the PREVIOUS frame was also inside the
+            // near-latch ring.  A cursor jump (autocorrect apply, tap-to-move,
+            // IME commit) can suddenly increase `dist` for every in-flight char
+            // with `everNear == true`, latching the entire batch to arrival in
+            // one frame — the user sees all chars pop at once.  Requiring two
+            // consecutive frames near the target treats real overshoots (the
+            // char passes through) and filters cursor teleports.
+            if (!fc.isSpray && dist < nearLatchRadius) everNear = true
+            if (!fc.isSpray && everNear &&
+                prevDist < nearLatchRadius &&
+                dist > prevDist + 2f
+            ) {
                 fc.active = false
                 break
             }
@@ -468,19 +563,60 @@ private fun FloatingCharItem(
                 velY += steerY * steerAccel * dt
             }
 
-            val dampFactor = 1f - velocityDamping * dt
-            velX *= dampFactor
-            velY *= dampFactor
+            // Split velocity into parallel (approach) and perpendicular (cross-track).
+            // Standard damping on the approach axis, aggressive damping on the cross-track
+            // axis. This kills lateral oscillation that otherwise makes the char snake
+            // side-to-side while closing on the cursor.
+            if (!fc.isSpray) {
+                val vAlong = velX * steerX + velY * steerY
+                val alongX = steerX * vAlong
+                val alongY = steerY * vAlong
+                val perpX = velX - alongX
+                val perpY = velY - alongY
+
+                val alongDamp = (1f - velocityDamping * dt).coerceAtLeast(0f)
+                val perpDamp = (1f - velocityDamping * 3.5f * dt).coerceAtLeast(0f)
+
+                velX = alongX * alongDamp + perpX * perpDamp
+                velY = alongY * alongDamp + perpY * perpDamp
+            } else {
+                val dampFactor = (1f - velocityDamping * dt).coerceAtLeast(0f)
+                velX *= dampFactor
+                velY *= dampFactor
+            }
 
             val effectiveMaxSpeed = if (fc.isSpray && totalTime < sprayFreeFlight) {
                 maxSpeed * 2f
             } else {
                 maxSpeed
             }
-            val distanceCap = (dist * 4f).coerceAtMost(effectiveMaxSpeed)
+
+            // Cap the *approach* speed as we near the target — the previous code capped
+            // total speed, which fought perpendicular velocity but happily let the char
+            // sail past the cursor at max speed. Here we brake the component that's
+            // actually going to overshoot.
+            if (!fc.isSpray) {
+                val vAlong = velX * steerX + velY * steerY
+                if (vAlong > 0f) {
+                    // Approach-speed ceiling: sqrt(2 * accel * dist) is the speed that still
+                    // lets steering decelerate before we reach the target. Use a safety
+                    // multiplier so we don't grind to a halt at long range.
+                    val approachCap = kotlin.math.min(
+                        effectiveMaxSpeed,
+                        sqrt(2f * steerAccel * dist) * 0.9f + 200f,
+                    )
+                    if (vAlong > approachCap) {
+                        val excess = vAlong - approachCap
+                        velX -= steerX * excess
+                        velY -= steerY * excess
+                    }
+                }
+            }
+
+            // Keep the global cap as a safety net.
             val speed = sqrt(velX * velX + velY * velY)
-            if (speed > distanceCap) {
-                val scale = distanceCap / speed
+            if (speed > effectiveMaxSpeed) {
+                val scale = effectiveMaxSpeed / speed
                 velX *= scale
                 velY *= scale
             }
@@ -502,11 +638,27 @@ private fun FloatingCharItem(
             if (fc.posY < bT) { fc.posY = bT; velY = -velY * bounceDamping }
             if (fc.posY > bB) { fc.posY = bB; velY = -velY * bounceDamping }
 
-            fc.alpha = (dist / (dist0 * 0.3f)).coerceIn(0f, 1f)
+            // Bug 1 fix: fade denominator was `dist0 * 0.3f`, captured at spawn.
+            // If the cursor moved between spawn and first frame, `dist0` could
+            // be way off, leaving chars either pinned to alpha=1 forever or
+            // fading prematurely.  `fadeRefDist` is seeded from the real first
+            // frame and gently tracks moving-away cursors so the fade stays
+            // reasonable even if the user keeps moving the caret.
+            if (dist > fadeRefDist) fadeRefDist = dist
+            fc.alpha = (dist / (fadeRefDist * 0.3f)).coerceIn(0f, 1f)
+            prevDist = dist
         }
+        // Smooth fade-out so a whole batch arriving on the same frame doesn't
+        // pop out together.  fadeOutAndRemove is a no-op if alpha is already 0.
+        fadeOutAndRemove(fc)
         onComplete()
     }
 
+    // Sub-pixel offset via graphicsLayer translation.  `Modifier.offset { ... }`
+    // rounded to IntOffset, which made low-speed approach motion stutter one
+    // pixel at a time — visible as a whole batch of chars juddering in unison
+    // when they all approach the same cursor at similar speeds.  translationX/Y
+    // on graphicsLayer is a float GPU transform, no rounding.
     Text(
         text = fc.text,
         style = TextStyle(
@@ -520,12 +672,31 @@ private fun FloatingCharItem(
             ),
         ),
         modifier = Modifier
-            .offset { IntOffset((fc.posX - overlayTopLeft.x).toInt(), (fc.posY - overlayTopLeft.y).toInt()) }
             .graphicsLayer(
+                translationX = fc.posX - overlayTopLeft.x,
+                translationY = fc.posY - overlayTopLeft.y,
                 alpha = fc.alpha,
                 rotationZ = fc.rotation,
                 scaleX = fc.scale,
-                scaleY = fc.scale
+                scaleY = fc.scale,
             ),
     )
+}
+
+/**
+ * Smoothly fades `fc.alpha` from its current value down to 0 over ~8 frames
+ * (~130 ms at 60 Hz).  Called after the physics loop breaks so a whole batch
+ * arriving on the same frame doesn't pop out together — instead each char
+ * finishes its own short fade before [FloatingCharOverlay]'s `onComplete`
+ * removes it from the snapshot list.  A no-op if alpha is already 0.
+ */
+private suspend fun fadeOutAndRemove(fc: FloatingChar) {
+    val startAlpha = fc.alpha
+    if (startAlpha <= 0f) return
+    val steps = 8
+    for (i in 1..steps) {
+        withFrameNanos { /* pace to vsync */ }
+        fc.alpha = (startAlpha * (1f - i.toFloat() / steps)).coerceAtLeast(0f)
+    }
+    fc.alpha = 0f
 }
